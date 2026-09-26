@@ -106,6 +106,7 @@ jobs:
       - name: 5. 配置 + 编译（自动愈合）
         working-directory: kernel
         run: |
+          set -o pipefail
           python3 ../autoheal.py . "${{ steps.cfg.outputs.def }}" 2>&1 | tee "$GITHUB_WORKSPACE/autoheal.log" | tail -80
           echo ""
           echo "== 产物 =="
