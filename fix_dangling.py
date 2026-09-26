@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""删除内核源码里指向"不存在文件/目录"的引用（OPPO 开源树常见问题）。
+"""剥离内核源码里指向不存在文件/目录的引用（OPPO 开源树常见问题）。
 
-用法:  python3 fix_dangling.py <kernel源码根目录>
+要点：Kconfig 里的 source 路径是相对【内核源码根目录】的，不是相对当前文件。
+用法: python3 fix_dangling.py <kernel根目录>
 """
-import os
-import re
-import sys
+import os, re, sys
 
-root = sys.argv[1] if len(sys.argv) > 1 else '.'
+root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else '.')
 kc = mk = mo = 0
-skipped = []
+missing_dirs = set()
 
+def rel_ok(ref, base):
+    p = os.path.normpath(os.path.join(base, ref))
+    return os.path.exists(p), p
 
-def walk_files(exts=None, names=None):
-    for dp, dn, fn in os.walk(root):
-        if '.git' in dp.split(os.sep):
-            continue
-        for f in fn:
-            if names and f in names:
-                yield os.path.join(dp, f)
-            elif exts and f.endswith(exts):
-                yield os.path.join(dp, f)
-
-
-# ---------- 1) Kconfig 里的 source 引用 ----------
-for p in list(walk_files(exts='', names=None)) or []:
-    pass
-
+# ---- 1) Kconfig: source 相对根目录 ----
 for dp, dn, fn in os.walk(root):
     if '.git' in dp.split(os.sep):
         continue
@@ -44,20 +32,18 @@ for dp, dn, fn in os.walk(root):
             m = re.match(r'[ \t]*source\s+"([^"]+)"', ln)
             if m:
                 ref = m.group(1)
-                if '$' in ref:
-                    skipped.append('%s -> %s' % (p, ref))
-                    out.append(ln)
-                    continue
-                if not os.path.exists(os.path.normpath(os.path.join(dp, ref))):
-                    print('[Kconfig] 删失效 source : %s -> %s' % (p, ref))
-                    changed = True
-                    kc += 1
-                    continue
+                if '$' not in ref:
+                    ok, tgt = rel_ok(ref, root)          # ★ 相对根目录
+                    if not ok:
+                        missing_dirs.add(ref.split('/')[0])
+                        print('[Kconfig] 删失效 source : %s -> %s' % (os.path.relpath(p, root), ref))
+                        changed = True; kc += 1
+                        continue
             out.append(ln)
         if changed:
             open(p, 'w', encoding='utf-8').write(''.join(out))
 
-# ---------- 2) Makefile: obj-* += 目录/ 和 obj-* += 文件.o ----------
+# ---- 2) Makefile: obj-* += 目录/ 和 目标.o（这两个相对当前文件目录） ----
 for dp, dn, fn in os.walk(root):
     if '.git' in dp.split(os.sep):
         continue
@@ -71,28 +57,23 @@ for dp, dn, fn in os.walk(root):
             continue
         out, changed = [], False
         for ln in txt.splitlines(True):
-            # 目录形式
             m = re.match(r'[ \t]*obj-[ym]?\s*\+=\s*([A-Za-z0-9_./+-]+)/[ \t]*$', ln)
             if m:
                 ref = m.group(1)
                 if '$' not in ref and not os.path.exists(os.path.normpath(os.path.join(dp, ref))):
-                    print('[Makefile] 删失效目录 : %s -> %s/' % (p, ref))
-                    changed = True
-                    mk += 1
+                    missing_dirs.add(ref.split('/')[0])
+                    print('[Makefile] 删失效目录 : %s -> %s/' % (os.path.relpath(p, root), ref))
+                    changed = True; mk += 1
                     continue
-                out.append(ln)
-                continue
-            # 文件 .o 形式（同名 .c/.S 都不存在才删）
+                out.append(ln); continue
             m2 = re.match(r'[ \t]*obj-[ym]?\s*\+=\s*([A-Za-z0-9_./+-]+)\.o[ \t]*$', ln)
             if m2:
                 ref = m2.group(1)
                 if '$' not in ref:
-                    base = os.path.normpath(os.path.join(dp, ref))
-                    if not (os.path.exists(base + '.c') or os.path.exists(base + '.S')
-                            or os.path.exists(base + '.s')):
-                        print('[Makefile] 删失效目标 : %s -> %s.o' % (p, ref))
-                        changed = True
-                        mo += 1
+                    b = os.path.normpath(os.path.join(dp, ref))
+                    if not (os.path.exists(b+'.c') or os.path.exists(b+'.S') or os.path.exists(b+'.s')):
+                        print('[Makefile] 删失效目标 : %s -> %s.o' % (os.path.relpath(p, root), ref))
+                        changed = True; mo += 1
                         continue
             out.append(ln)
         if changed:
@@ -101,8 +82,6 @@ for dp, dn, fn in os.walk(root):
 print('')
 print('=' * 62)
 print('修复完成：Kconfig %d 条，Makefile 目录 %d 条，Makefile 目标 %d 条' % (kc, mk, mo))
-if skipped:
-    print('跳过含变量的引用 %d 条（前 3）：' % len(skipped))
-    for s in skipped[:3]:
-        print('   ' + s)
+if missing_dirs:
+    print('涉及的缺失私有目录（顶层）: %s' % ', '.join(sorted(missing_dirs)[:20]))
 print('=' * 62)
