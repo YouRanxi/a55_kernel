@@ -76,7 +76,7 @@ def disable_ref(name):
 
 print('==== A: 生成 defconfig ====', flush=True)
 ok = False
-for i in range(1, 201):
+for i in range(1, 401):
     rc, out = run(MAKE + [DEF])
     if rc == 0:
         print('  OK（第 %d 次尝试）' % i, flush=True); ok = True; break
@@ -101,10 +101,26 @@ if not ok:
 print('', flush=True)
 print('==== B: 完整编译 ====', flush=True)
 ok = False
-for i in range(1, 201):
+for i in range(1, 401):
     rc, out = run(MAKE + ['-j%d' % (os.cpu_count() or 4)])
     if rc == 0:
         print('  编译 OK（第 %d 次尝试）' % i, flush=True); ok = True; break
+    # ---- 缺头文件 -> 补空占位 ----
+    mh = re.search(r"fatal error: ([^\s:()]+\.h): No such file", out)
+    if mh:
+        hdr = mh.group(1)
+        tgt = os.path.join(ROOT, 'include', hdr)
+        if not os.path.exists(tgt):
+            try:
+                os.makedirs(os.path.dirname(tgt), exist_ok=True)
+                open(tgt, 'w').write('#pragma once\n/* auto-stub: 原厂开源包缺失的私有头文件 */\n')
+                print('  第 %d 次: 补空头文件 %s' % (i, hdr), flush=True)
+                continue
+            except Exception as e:
+                print('  补头文件失败: %s' % e, flush=True)
+        else:
+            print('  第 %d 次: 头文件已存在仍报缺失: %s' % (i, hdr), flush=True)
+
     m = re.search(r"No rule to make target ['\"]([^'\"]+)['\"]", out)
     if m:
         leaf = key_from_target(m.group(1))
