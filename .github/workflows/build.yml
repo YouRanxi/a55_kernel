@@ -93,6 +93,12 @@ jobs:
           echo "== 确认 =="; grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || echo "(未找到 KSU 配置行)"
           echo "== KSU 目录 =="; ls -d KernelSU drivers/kernelsu 2>/dev/null || true
 
+      - name: 4.5 修复缺失的私有目录引用
+        working-directory: kernel
+        run: |
+          echo "=== 修复失效引用 ==="
+          python3 ../fix_dangling.py . 2>&1 | tail -50
+          echo ""
       - name: 5. 配置 + 编译
         working-directory: kernel
         run: |
