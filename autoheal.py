@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""自动愈合不完整的内核源码树（OPPO 开源包经典问题）v3。
+"""自动愈合不完整的内核源码树（OPPO 开源包经典问题）v5。
 
-v3 新增：
-  * 父路径"是文件不是目录"时，直接删掉那个（被 ZIP 弄坏的符号链接）文件，改建目录
-  * 补头文件失败时，退而求其次：把 #include 那一行注释掉
+v5 关键修复：
+  * 判断路径存在必须用 os.path.lexists（断掉的符号链接 exists() 会返回 False！）
+  * 阶段 A 成功后，往 defconfig 追加"关闭调试信息"，避免 objdump 警告淹没真正的错误
 用法: python3 autoheal.py <kernel根目录> <defconfig名>
 """
 import os
@@ -38,29 +38,35 @@ def key_from(rel):
 
 
 def ensure_dir(d):
-    """保证 d 是目录：如果是被 ZIP 弄坏的文件，删掉后建目录"""
+    """保证 d 是目录。注意断掉的符号链接：exists() 会说"不存在"，lexists() 才是真相。"""
     if os.path.isdir(d):
         return True
-    if os.path.exists(d):
+    if os.path.lexists(d):
         try:
-            os.remove(d)
-            print('[fixdir] 删除被 ZIP 破坏的文件，改建目录: %s' % os.path.relpath(d, ROOT), flush=True)
+            if os.path.islink(d) or os.path.isfile(d):
+                os.remove(d)
+                print('[fixdir] 删除坏链接/占位文件，改建目录: %s' % os.path.relpath(d, ROOT), flush=True)
+            else:
+                print('[fixdir] 存在但既非目录也非普通文件: %s' % os.path.relpath(d, ROOT), flush=True)
+                return False
         except Exception as e:
-            print('[fixdir-fail] %s : %s' % (d, e), flush=True)
+            print('[fixdir-fail] 删除失败 %s : %s' % (d, e), flush=True)
             return False
     try:
         os.makedirs(d, exist_ok=True)
         return True
     except Exception as e:
-        print('[fixdir-fail] %s : %s' % (d, e), flush=True)
+        print('[fixdir-fail] 建目录失败 %s : %s' % (d, e), flush=True)
         return False
 
 
 def stub_file(rel, comment):
     tgt = os.path.join(ROOT, rel)
-    if os.path.exists(tgt):
-        kind = 'DIR' if os.path.isdir(tgt) else 'FILE'
-        print('[skip] 已存在(%s): %s' % (kind, rel), flush=True)
+    if os.path.lexists(tgt):
+        if os.path.isdir(tgt):
+            print('[skip] 已是目录: %s' % rel, flush=True)
+            return False
+        print('[skip] 已存在文件: %s' % rel, flush=True)
         return False
     d = os.path.dirname(tgt)
     if d and not ensure_dir(d):
@@ -105,9 +111,9 @@ def disable_ref(name):
 
 
 def comment_include(hdr):
-    """把所有 #include <hdr> / "hdr" 注释掉"""
+    """把 #include <hdr> / "hdr" 注释掉（C 文件里必须用 //，不能用 #）"""
     done = 0
-    pat = re.compile(r'^(\s*)#\s*include\s*[<"]' + re.escape(hdr) + r'[>"]')
+    pat = re.compile(r'^\s*#\s*include\s*[<"]' + re.escape(hdr) + r'[>"]')
     for dp, dn, fn in os.walk(ROOT):
         if '.git' in dp.split(os.sep):
             continue
@@ -159,6 +165,23 @@ if not ok:
     print('  !! 超限', flush=True)
     sys.exit(3)
 
+# ---- A2: 关掉调试信息，避免 objdump 警告淹没真正的错误 ----
+cfg = os.path.join(ROOT, 'arch', 'arm64', 'configs', DEF)
+try:
+    txt = open(cfg, encoding='utf-8', errors='replace').read()
+    if 'CONFIG_DEBUG_INFO is not set' not in txt:
+        with open(cfg, 'a') as f:
+            f.write('\n# ---- autoheal: 关闭调试信息（减小体积、避免 objdump 噪音）----\n')
+            for k in ['CONFIG_DEBUG_INFO', 'CONFIG_DEBUG_INFO_BTF', 'CONFIG_DEBUG_INFO_DWARF4',
+                      'CONFIG_DEBUG_INFO_REDUCED', 'CONFIG_DEBUG_INFO_SPLIT',
+                      'CONFIG_DEBUG_INFO_COMPRESSED', 'CONFIG_GDB_SCRIPTS']:
+                f.write('# %s is not set\n' % k)
+        print('[cfg] 已在 defconfig 追加"关闭调试信息"', flush=True)
+        rc, out = run(MAKE + [DEF])
+        print('  重生成 .config: %s' % ('OK' if rc == 0 else 'FAIL'), flush=True)
+except Exception as e:
+    print('[cfg] 追加失败: %s' % e, flush=True)
+
 print('', flush=True)
 print('==== B: 完整编译 ====', flush=True)
 ok = False
@@ -170,8 +193,6 @@ for i in range(1, 401):
         break
 
     handled = False
-
-    # 1) 缺头文件
     mh = RE_HEADER.search(out)
     if mh:
         hdr = mh.group(1)
@@ -180,12 +201,11 @@ for i in range(1, 401):
             print('  第 %d 次: 补空头文件 %s' % (i, hdr), flush=True)
             handled = True
         elif comment_include(hdr):
-            print('  第 %d 次: 已注释掉 #include <%s>' % (i, hdr), flush=True)
+            print('  第 %d 次: 已注释 #include <%s>' % (i, hdr), flush=True)
             handled = True
         if handled:
             continue
 
-    # 2) 缺目标
     m = RE_NOTARGET.search(out)
     if m:
         leaf = key_from(m.group(1))
@@ -194,9 +214,10 @@ for i in range(1, 401):
             continue
         print('  !! 找不到引用处', flush=True)
 
-    print('  编译失败且无法自动修复，末尾 25 行:', flush=True)
-    for l in out.splitlines()[-25:]:
-        print('   ', l[:150], flush=True)
+    print('  编译失败，末尾 30 行（已过滤 objdump 噪音）:', flush=True)
+    tail = [l for l in out.splitlines() if 'objdump' not in l and 'DIE at offset' not in l]
+    for l in tail[-30:]:
+        print('   ', l[:160], flush=True)
     print('  !! 中止（第 %d 次）' % i, flush=True)
     sys.exit(4)
 
