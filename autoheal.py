@@ -122,7 +122,7 @@ def comment_include(hdr):
             out, ch = [], False
             for ln in lines:
                 if pat.match(ln):
-                    out.append('# auto-disabled-include: ' + ln)
+                    out.append('// auto-disabled-include: ' + ln)
                     ch = True
                     done += 1
                     print('[noinclude] %s' % os.path.relpath(p, ROOT), flush=True)
