@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """自动愈合不完整的内核源码树（OPPO 开源包经典问题）。
 
-A. 反复跑 make <defconfig>；报 can't open file "X" 就创建空占位 X，重试
-B. 反复跑 make；报 No rule to make target 'X' 就注释掉引用它的那行，重试
+注意：GitHub 的 ZIP 会把符号链接变成普通文件，所以"路径存在但不是目录"要单独处理。
 用法: python3 autoheal.py <kernel根目录> <defconfig名>
 """
 import os, re, subprocess, sys
@@ -18,17 +17,29 @@ def run(args, timeout=7200):
     return p.returncode, (p.stdout or '') + (p.stderr or '')
 
 def stub(rel):
+    """创建空占位文件。返回 True=成功；False=搞不定（调用方改走禁用引用）"""
     tgt = os.path.join(ROOT, rel)
     if os.path.exists(tgt):
+        kind = 'DIR' if os.path.isdir(tgt) else 'FILE'
+        print('[stub-skip] 已存在(%s): %s' % (kind, rel))
         return False
     d = os.path.dirname(tgt)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    open(tgt, 'w').write('# auto-stub: 原厂开源包中缺失，用空配置占位\n')
-    print('[stub] 创建空占位: %s' % rel)
-    return True
+    try:
+        if d and not os.path.isdir(d):
+            try:
+                os.makedirs(d, exist_ok=True)
+            except FileExistsError:
+                print('[stub-fail] 父路径存在但不是目录（多为符号链接被 ZIP 变成文件）: %s' % os.path.dirname(rel))
+                return False
+        open(tgt, 'w').write('# auto-stub: 原厂开源包中缺失，用空配置占位\n')
+        print('[stub] 创建空占位: %s' % rel)
+        return True
+    except Exception as e:
+        print('[stub-fail] %s : %s' % (rel, e))
+        return False
 
-def comment_out(leaf):
+def disable_ref(name):
+    """注释掉引用 name 的 source / obj- 行"""
     done = 0
     for dp, dn, fn in os.walk(ROOT):
         if '.git' in dp.split(os.sep):
@@ -44,53 +55,66 @@ def comment_out(leaf):
             out, ch = [], False
             for ln in lines:
                 s = ln.strip()
-                if not s.startswith('#') and (s.startswith('obj-') or s.startswith('source')) and leaf in ln:
+                if not s.startswith('#') and (s.startswith('source') or s.startswith('obj-')) and name in ln:
                     out.append('# auto-disabled: ' + ln)
                     ch = True; done += 1
-                    print('[disable] %s : %s' % (os.path.relpath(p, ROOT), s[:90]))
+                    print('[disable] %s : %s' % (os.path.relpath(p, ROOT), s[:88]))
                     continue
                 out.append(ln)
             if ch:
                 open(p, 'w', encoding='utf-8').write(''.join(out))
     return done
 
-print('==== A: 生成 defconfig（自动补占位）====')
-for i in range(1, 81):
+print('==== A: 生成 defconfig ====', flush=True)
+ok = False
+for i in range(1, 201):
     rc, out = run(MAKE + [DEF])
     if rc == 0:
-        print('  OK（第 %d 次）' % i); break
+        print('  OK（第 %d 次尝试）' % i, flush=True); ok = True; break
     m = re.search(r"can't open file \"([^\"]+)\"", out)
-    if not m:
-        print('  无法自动修复，末尾 25 行:'); [print('   ', l[:150]) for l in out.splitlines()[-25:]]
-        sys.exit(1)
-    if not stub(m.group(1)):
-        print('  !! 已存在却仍缺失: %s' % m.group(1)); sys.exit(1)
-else:
-    print('  !! 超限'); sys.exit(1)
+    if m:
+        ref = m.group(1)
+        if stub(ref):
+            continue
+        leaf = os.path.basename(os.path.dirname(ref)) or os.path.basename(ref)
+        if disable_ref(leaf):
+            continue
+        print('  !! 无法处理: %s' % ref, flush=True)
+    else:
+        print('  无法自动修复，末尾 20 行:', flush=True)
+        for l in out.splitlines()[-20:]:
+            print('   ', l[:150], flush=True)
+    print('  !! 中止（第 %d 次）' % i, flush=True)
+    sys.exit(3)
+if not ok:
+    print('  !! 超限', flush=True); sys.exit(3)
 
-print('')
-print('==== B: 完整编译（自动禁用缺失目标）====')
-for i in range(1, 121):
+print('', flush=True)
+print('==== B: 完整编译 ====', flush=True)
+ok = False
+for i in range(1, 201):
     rc, out = run(MAKE + ['-j%d' % (os.cpu_count() or 4)])
     if rc == 0:
-        print('  编译 OK（第 %d 次）' % i); break
+        print('  编译 OK（第 %d 次尝试）' % i, flush=True); ok = True; break
     m = re.search(r"No rule to make target ['\"]([^'\"]+)['\"]", out)
     if m:
         leaf = os.path.basename(m.group(1))
-        print('  第 %d 次: 缺目标 %s' % (i, m.group(1)))
-        if comment_out(leaf):
+        print('  第 %d 次: 缺目标 %s' % (i, m.group(1)), flush=True)
+        if disable_ref(leaf):
             continue
-        print('  !! 找不到引用处')
+        print('  !! 找不到引用处', flush=True)
     else:
-        print('  编译失败且无法自动修复，末尾 30 行:')
-        [print('   ', l[:150]) for l in out.splitlines()[-30:]]
-        sys.exit(1)
-else:
-    print('  !! 超限'); sys.exit(1)
+        print('  编译失败，末尾 25 行:', flush=True)
+        for l in out.splitlines()[-25:]:
+            print('   ', l[:150], flush=True)
+    print('  !! 中止（第 %d 次）' % i, flush=True)
+    sys.exit(4)
+if not ok:
+    print('  !! 超限', flush=True); sys.exit(4)
 
-print('')
-print('==== 产物 ====')
+print('', flush=True)
+print('==== 产物 ====', flush=True)
 for p in ['out/arch/arm64/boot/Image.gz-dtb','out/arch/arm64/boot/Image.gz','out/arch/arm64/boot/Image']:
     fp = os.path.join(ROOT, p)
     if os.path.exists(fp):
-        print('  %s (%d 字节)' % (p, os.path.getsize(fp)))
+        print('  %s (%d 字节)' % (p, os.path.getsize(fp)), flush=True)
