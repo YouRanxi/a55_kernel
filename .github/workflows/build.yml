@@ -24,6 +24,10 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      # 拉取本仓库（脚本 / fix_dangling.py）
+      - name: 准备（拉取本仓库脚本）
+        uses: actions/checkout@v4
+
       - name: 0. 环境信息
         run: |
           echo "== CPU =="; nproc
