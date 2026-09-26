@@ -1,0 +1,163 @@
+name: Build A55 Kernel (KernelSU)
+
+# 手动触发：仓库页面 -> Actions -> 左侧选本工作流 -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'defconfig 名字（留空=自动选第一个含 6833 的）'
+        required: false
+        default: ''
+      ksu_mode:
+        description: 'KernelSU 模式'
+        required: true
+        default: 'kernelsu'
+        type: choice
+        options:
+          - kernelsu
+          - sukisu
+          - none
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 0. 环境信息
+        run: |
+          echo "== CPU =="; nproc
+          echo "== 内存 =="; free -h
+          echo "== 磁盘 =="; df -h /
+          echo "== 系统 =="; lsb_release -a || cat /etc/os-release
+
+      - name: 1. 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip python3 git curl wget cpio kmod rsync \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            clang llvm lld
+          echo "== 工具链版本 =="
+          clang --version | head -2
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: 2. 下载内核源码（GitHub 直连，无需镜像）
+        run: |
+          curl -L --retry 5 -o kernel.zip \
+            "https://github.com/oppo-source/android_kernel_oppo_mt6833/archive/refs/heads/oppo/mt6833_t_13.0_a55_a53s_k9x_5g.zip"
+          unzip -q kernel.zip
+          mv android_kernel_oppo_mt6833-* kernel
+          echo "== 源码文件数 =="; find kernel -type f | wc -l
+          echo "== 内核版本 =="; grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) *=' kernel/Makefile
+
+      - name: 3. 列出可用 defconfig
+        id: cfg
+        working-directory: kernel
+        run: |
+          echo "=== 含 6833 的 defconfig ==="
+          ls arch/arm64/configs/ | grep -i 6833 || echo "(没有含 6833 的)"
+          echo ""
+          echo "=== 前 60 个 defconfig 供参考 ==="
+          ls arch/arm64/configs/ | head -60
+          DEF="${{ github.event.inputs.defconfig }}"
+          if [ -z "$DEF" ]; then
+            DEF="$(ls arch/arm64/configs/ | grep -i 6833 | head -1)"
+          fi
+          if [ -z "$DEF" ]; then
+            echo "!! 必须先确定 defconfig，请重新运行并填写 defconfig 名字" >&2
+            exit 1
+          fi
+          echo "选用 defconfig = $DEF"
+          echo "def=$DEF" >> $GITHUB_OUTPUT
+          echo "== 该 defconfig 里的 OPLUS 特性数 =="
+          grep -c OPLUS_FEATURE "arch/arm64/configs/$DEF" || true
+
+      - name: 4. 打 KernelSU 补丁
+        if: ${{ github.event.inputs.ksu_mode != 'none' }}
+        working-directory: kernel
+        run: |
+          case "${{ github.event.inputs.ksu_mode }}" in
+            kernelsu) URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" ;;
+            sukisu)   URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" ;;
+          esac
+          echo "补丁来源: $URL"
+          curl -LSs "$URL" -o /tmp/ksu.sh
+          bash /tmp/ksu.sh
+          DEF="${{ steps.cfg.outputs.def }}"
+          if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
+            cp "arch/arm64/configs/$DEF" "arch/arm64/configs/$DEF.orig"
+            printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
+          fi
+          echo "== 确认 =="; grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || echo "(未找到 KSU 配置行)"
+          echo "== KSU 目录 =="; ls -d KernelSU drivers/kernelsu 2>/dev/null || true
+
+      - name: 5. 配置 + 编译
+        working-directory: kernel
+        run: |
+          DEF="${{ steps.cfg.outputs.def }}"
+          export ARCH=arm64
+          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          echo "== 生成 .config =="
+          $MAKE "$DEF" 2>&1 | tail -5
+          echo "== 开始编译（-j$(nproc)）=="
+          set -o pipefail
+          $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -40
+          echo ""
+          echo "== 产物 =="
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
+
+      - name: 6. 打包 boot.img（如果仓库里放了 boot.bin）
+        working-directory: kernel
+        run: |
+          IMAGE=""
+          for c in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+            [ -f "$c" ] && IMAGE="$c" && break
+          done
+          if [ -z "$IMAGE" ]; then echo "没找到内核镜像，跳过打包"; exit 0; fi
+          echo "内核镜像: $IMAGE ($(du -h $IMAGE | cut -f1))"
+
+          if [ ! -f ../boot.bin ]; then
+            echo "仓库根目录没有 boot.bin，只输出内核镜像"
+            cp "$IMAGE" ../kernel_image
+            exit 0
+          fi
+
+          # 获取 magiskboot
+          curl -L -o /tmp/magisk.apk https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk
+          unzip -o -j /tmp/magisk.apk 'lib/arm64-v8a/libmagiskboot.so' -d /tmp >/dev/null
+          chmod +x /tmp/libmagiskboot.so
+          MB=/tmp/libmagiskboot.so
+
+          mkdir -p /tmp/pack && cp ../boot.bin /tmp/pack/boot_orig.img
+          cd /tmp/pack
+          "$MB" unpack boot_orig.img
+          cp "$GITHUB_WORKSPACE/kernel/$IMAGE" kernel
+          echo "替换后内核大小: $(du -h kernel | cut -f1)"
+          "$MB" repack boot_kernelsu.img
+          ls -la boot_kernelsu.img
+          cp boot_kernelsu.img kernel_image 2>/dev/null || true
+          cp boot_kernelsu.img "$GITHUB_WORKSPACE/boot_kernelsu.img"
+          cp boot_orig.img "$GITHUB_WORKSPACE/"
+
+      - name: 7. 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a55-kernel-output
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            kernel/out/arch/arm64/boot/*
+            kernel/build.log
+            kernel_image
+            boot_kernelsu.img
+            boot_orig.img
+
+      - name: 8. 失败时输出关键日志尾部
+        if: failure()
+        working-directory: kernel
+        run: |
+          echo "=========== build.log 最后 80 行 ==========="
+          tail -80 build.log 2>/dev/null || echo "(没有 build.log)"
