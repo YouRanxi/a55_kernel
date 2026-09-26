@@ -16,6 +16,15 @@ def run(args, timeout=7200):
     p = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, errors='replace', timeout=timeout)
     return p.returncode, (p.stdout or '') + (p.stderr or '')
 
+def key_from_target(t):
+    """从 'No rule to make target X' 里提取最有辨识度的关键词"""
+    t = t.replace('\\', '/')
+    parts = [p for p in t.split('/') if p and p != '..' and p != '.']
+    if parts and parts[-1] in ('Makefile', 'Kbuild', 'Kconfig'):
+        parts = parts[:-1]
+    return parts[-1] if parts else t
+
+
 def stub(rel):
     """创建空占位文件。返回 True=成功；False=搞不定（调用方改走禁用引用）"""
     tgt = os.path.join(ROOT, rel)
@@ -55,7 +64,7 @@ def disable_ref(name):
             out, ch = [], False
             for ln in lines:
                 s = ln.strip()
-                if not s.startswith('#') and (s.startswith('source') or s.startswith('obj-')) and name in ln:
+                if not s.startswith('#') and (s.startswith('source') or s.startswith('obj-') or s.startswith('subdir-') or s.startswith('ifeq')) and name in ln:
                     out.append('# auto-disabled: ' + ln)
                     ch = True; done += 1
                     print('[disable] %s : %s' % (os.path.relpath(p, ROOT), s[:88]))
@@ -76,7 +85,7 @@ for i in range(1, 201):
         ref = m.group(1)
         if stub(ref):
             continue
-        leaf = os.path.basename(os.path.dirname(ref)) or os.path.basename(ref)
+        leaf = key_from_target(ref)
         if disable_ref(leaf):
             continue
         print('  !! 无法处理: %s' % ref, flush=True)
@@ -98,8 +107,8 @@ for i in range(1, 201):
         print('  编译 OK（第 %d 次尝试）' % i, flush=True); ok = True; break
     m = re.search(r"No rule to make target ['\"]([^'\"]+)['\"]", out)
     if m:
-        leaf = os.path.basename(m.group(1))
-        print('  第 %d 次: 缺目标 %s' % (i, m.group(1)), flush=True)
+        leaf = key_from_target(m.group(1))
+        print('  第 %d 次: 缺目标 %s  (关键词=%s)' % (i, m.group(1), leaf), flush=True)
         if disable_ref(leaf):
             continue
         print('  !! 找不到引用处', flush=True)
