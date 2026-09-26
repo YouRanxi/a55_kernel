@@ -103,20 +103,13 @@ jobs:
           echo "=== 修复失效引用 ==="
           python3 ../fix_dangling.py . 2>&1 | tail -50
           echo ""
-      - name: 5. 配置 + 编译
+      - name: 5. 配置 + 编译（自动愈合）
         working-directory: kernel
         run: |
-          DEF="${{ steps.cfg.outputs.def }}"
-          export ARCH=arm64
-          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-          echo "== 生成 .config =="
-          $MAKE "$DEF" 2>&1 | tail -5
-          echo "== 开始编译（-j$(nproc)）=="
-          set -o pipefail
-          $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -40
+          python3 ../autoheal.py . "${{ steps.cfg.outputs.def }}" 2>&1 | tee "$GITHUB_WORKSPACE/autoheal.log" | tail -80
           echo ""
           echo "== 产物 =="
-          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(空)"
 
       - name: 6. 打包 boot.img（如果仓库里放了 boot.bin）
         working-directory: kernel
