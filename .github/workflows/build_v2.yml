@@ -133,6 +133,26 @@ jobs:
           grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || true
           ls -d KernelSU drivers/kernelsu 2>/dev/null || true
 
+      - name: 4.6 解除供应商子目录 Makefile 里的「通用 -Werror」
+        run: |
+          # 为什么 KCFLAGS=-Wno-error 不够：
+          #   各子目录自己写的 ccflags-y/subdir-ccflags-y 会排在 KCFLAGS【之后】，
+          #   例如 drivers/devfreq/helio-dvfsrc-v3/Makefile: ccflags-y += -Werror
+          #   于是新版 clang 对供应商代码报的风格告警（unused-but-set-variable 等）
+          #   又变回致命错误。
+          # 这里只把【非 = 形式】的 -Werror 改成 -Wno-error，
+          # 刻意保留 -Werror=xxx 与 -Werror-implicit-function-declaration（另一个开关管）。
+          CNT=0
+          while IFS= read -r f; do
+            if grep -qE -- '-Werror([[:space:]]|$)' "$f"; then
+              sed -i -E 's/-Werror([[:space:]])/-Wno-error\1/g; s/-Werror$/-Wno-error/g' "$f"
+              CNT=$((CNT+1)); echo "  patched: $f"
+            fi
+          done < <(find kernel vendor -name Makefile -o -name Kbuild -o -name '*.mk' 2>/dev/null)
+          echo "共修改 $CNT 个文件"
+          echo "== 复验：不应再有通用 -Werror =="
+          grep -rnE -- '-Werror([[:space:]]|$)' kernel vendor --include=Makefile --include=Kbuild --include='*.mk' | head -10 || echo "(已清零)"
+
       - name: 5. 配置 + 编译
         working-directory: kernel
         run: |
