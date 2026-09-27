@@ -57,8 +57,19 @@ jobs:
             https://github.com/oppo-source/android_kernel_oppo_mt6833.git kernel
 
           echo "== 克隆 OPPO 模块/vendor 树（约 254 MB，depth=1）=="
+          # 注意：该仓库的【根目录本身就是 vendor/】，所以必须先克隆到临时目录，
+          #       再把它的 vendor/ 搬到与 kernel/ 平级的位置。
+          #       直接 git clone ... ./vendor 会得到 ./vendor/vendor/oplus/... —— 差一层，
+          #       表现为「符号链接全部悬空」，本次 run#1 就是栽在这。
           git clone --depth 1 -b "$BRANCH" \
-            https://github.com/oppo-source/android_kernel_modules_oppo_mt6833.git vendor
+            https://github.com/oppo-source/android_kernel_modules_oppo_mt6833.git /tmp/oplus-mods
+          mv /tmp/oplus-mods/vendor ./vendor
+          rm -rf /tmp/oplus-mods
+
+          echo "== 布局自检（快速失败：位置不对就别浪费 40 分钟去编译）=="
+          test -f vendor/oplus/kernel/oplus_performance/sched_assist/sched_assist_mutex.h \
+            || { echo "!! vendor 树不在正确位置（应为 <workspace>/vendor/oplus/...）"; exit 1; }
+          echo "OK  vendor 树就位"
 
           echo "== 内核版本 =="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) *=' kernel/Makefile
@@ -68,7 +79,7 @@ jobs:
 
           echo "== 断链自检：全树悬空符号链接数（期望 0 或极少）=="
           python3 - <<'PY'
-          import os
+          import os, sys
           bad=[]; total=0
           for dp,dn,fn in os.walk('kernel'):
               for f in list(dn)+fn:
@@ -78,6 +89,8 @@ jobs:
                       if not os.path.exists(p): bad.append(p)
           print('符号链接总数 =',total,'  悬空 =',len(bad))
           for b in bad[:20]: print('   DANGLING',b, '->', os.readlink(b))
+          if len(bad) > 5:
+              print('!! 悬空链接过多，vendor 树没接上，直接中止'); sys.exit(1)
           PY
 
       - name: 3. 确认 defconfig
