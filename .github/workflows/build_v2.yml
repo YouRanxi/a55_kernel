@@ -139,7 +139,11 @@ jobs:
           set -o pipefail
           DEF="${{ steps.cfg.outputs.def }}"
           export ARCH=arm64
-          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          # KCFLAGS=-Wno-error：OPPO 供应商代码是按 Android 自带的老 clang 写的，
+          # 用新版 clang 编会出现一批 -Werror=xxx 的【风格告警】直接变错误
+          # （首个：sched_assist_slide_v1.c:129 old-style function definition
+          #  -Werror,-Wstrict-prototypes ）。-Wno-error 只降级告警，真错误照样报。
+          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error"
           echo "== 生成 .config =="
           $MAKE "$DEF" 2>&1 | tail -5
           echo "== 编译 =="
@@ -192,5 +196,8 @@ jobs:
         if: failure()
         working-directory: kernel
         run: |
-          echo "=========== build.log 最后 100 行 ==========="
-          tail -100 build.log 2>/dev/null || echo "(没有 build.log)"
+          echo "=========== 真正的错误行（-j 并行会把 error 埋在几万行里）==========="
+          grep -n -E "error:|Error [0-9]|No rule to make|can't open file|undefined reference" build.log 2>/dev/null | grep -v objdump | head -40 || echo "(grep 无命中)"
+          echo
+          echo "=========== build.log 最后 80 行 ==========="
+          tail -80 build.log 2>/dev/null || echo "(没有 build.log)"
