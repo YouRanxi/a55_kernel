@@ -71,6 +71,15 @@ jobs:
             || { echo "!! vendor 树不在正确位置（应为 <workspace>/vendor/oplus/...）"; exit 1; }
           echo "OK  vendor 树就位"
 
+          echo "== 修正仓库自带的 1 处错误链接 =="
+          # drivers/base/kernelFwUpdate 的目标写成了 ../../../../vnd/vendor/...，
+          # 多一个 OPPO 内部构建路径残留的 vnd/ 前缀；正确目标就在模块包里。
+          ln -sfn ../../../../vendor/oplus/kernel/touchpanel/kernelFwUpdate/ \
+                 kernel/drivers/base/kernelFwUpdate
+          readlink kernel/drivers/base/kernelFwUpdate
+          test -d kernel/drivers/base/kernelFwUpdate \
+            && echo "OK  kernelFwUpdate 已接上" || { echo "!! 仍未接上"; exit 1; }
+
           echo "== 内核版本 =="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) *=' kernel/Makefile
 
@@ -89,7 +98,7 @@ jobs:
                       if not os.path.exists(p): bad.append(p)
           print('符号链接总数 =',total,'  悬空 =',len(bad))
           for b in bad[:20]: print('   DANGLING',b, '->', os.readlink(b))
-          if len(bad) > 5:
+          if len(bad) > 0:
               print('!! 悬空链接过多，vendor 树没接上，直接中止'); sys.exit(1)
           PY
 
