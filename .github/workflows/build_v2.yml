@@ -428,6 +428,30 @@ jobs:
                   '#ifndef LIST_SEG_MAX\n#define LIST_SEG_MAX 8\n#endif\n' + s)
               print('PATCHED LIST_SEG_MAX fallback')
           PY
+          # 同源的第二个缺口：wlan_oid.c 用到 nicCmdEventListmode 回调，公开树里没有。
+          # 签名与 nic_cmd_event.h 里其它 nicCmdEvent* 一致（prAdapter/prCmdInfo/pucEventBuf）。
+          # ListMode 是 QA 工具功能，空实现占位只打日志，不影响正常联网。
+          OIDC="$MODDIR/wlan/core/gen4m/common/wlan_oid.c"
+          python3 - "$OIDC" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'void nicCmdEventListmode(' in s:
+              print('已补过，跳过')
+          else:
+              anchor = 'uint32_t wlanoidListMode(IN struct ADAPTER *prAdapter,'
+              stub = ('/* 公开源码缺失的私有回调（ListMode 为 QA 工具功能），空实现占位 */\n'
+                      'void nicCmdEventListmode(IN struct ADAPTER *prAdapter,\n'
+                      '\t\t\t IN struct CMD_INFO *prCmdInfo, IN uint8_t *pucEventBuf)\n'
+                      '{\n'
+                      '\tDBGLOG(OID, TRACE, "nicCmdEventListmode stub: QA-only feature\\n");\n'
+                      '}\n\n')
+              if anchor not in s:
+                  print('!! 锚点未命中，跳过')
+              else:
+                  open(p, 'w', encoding='utf-8').write(s.replace(anchor, stub + anchor, 1))
+                  print('PATCHED nicCmdEventListmode stub')
+          PY
           build_mod wmt_chrdev_wifi  "$MODDIR/wlan/adaptor"     || true
           build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
