@@ -407,8 +407,17 @@ jobs:
           build_mod conninfra        "$MODDIR/conninfra"        || true
           build_mod connfem          "$MODDIR/connfem"          || true
           build_mod wmt_drv          "$MODDIR/common"           || true
+          # 后建的模块要用先建模块导出的符号（wmt_drv 导出 mtk_wcn_wmt_func_on /
+          # mtk_wcn_stp_set_bluez 等，run#18 里 bt 就因缺符号而残废）
+          export KBUILD_EXTRA_SYMBOLS="$MODDIR/common/Module.symvers $MODDIR/conninfra/Module.symvers $MODDIR/connfem/Module.symvers"
+          # HIF=AXI 的铁证：原厂 wlan_drv_gen4m.ko 二进制里 "axi" 出现 20 次，sdio/pcie 均为 0
+          export CONFIG_MTK_COMBO_WIFI_HIF=axi
+          export WLAN_CHIP_ID=6853
+          build_mod wmt_chrdev_wifi  "$MODDIR/wlan/adaptor"     || true
           build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
-          build_mod bt_wmt           "$MODDIR/bt/mt66xx/wmt"    || true
+          # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
+          export BT_PLATFORM=connac1x
+          build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
           echo "======== 收集 .ko ========"
           find "$MODDIR" -name '*.ko' -exec cp -v {} "$OUTDIR/" \; 2>/dev/null | head
           ls -la "$OUTDIR"
