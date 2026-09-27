@@ -164,6 +164,33 @@ jobs:
           echo "== 复验：不应再有通用 -Werror =="
           grep -rnE -- '-Werror([[:space:]]|$)' kernel vendor --include=Makefile --include=Kbuild --include='*.mk' | head -10 || echo "(已清零)"
 
+      - name: 4.7 补 vendor 代码依赖的 Android 树布局
+        run: |
+          set -e
+          KROOT="$(cd kernel && pwd)"
+          echo "内核目录 = $KROOT"
+
+          # vendor 里的充电代码写死了 ../../../../kernel-4.19/drivers/...
+          # （OPPO 在 Android 源码树里把内核检出为 kernel-4.19/，而我们是 kernel/）。
+          # 由于该文件是通过 drivers/power/oplus -> ../../../vendor/oplus/kernel/charger/
+          # 这个符号链接被编到的，clang 记录的目录名是「拼写路径」，具体落在哪一级不好推定，
+          # 所以把几种可能的落点都建上（都是无害的软链，只影响 include 查找）。
+          ln -sfn . "$KROOT/kernel-4.19"
+          mkdir -p "$KROOT/drivers"
+          ln -sfn .. "$KROOT/drivers/kernel-4.19"
+          ln -sfn kernel "$KROOT/../kernel-4.19"
+          mkdir -p "$KROOT/../vendor"
+          ln -sfn ../kernel "$KROOT/../vendor/kernel-4.19"
+
+          echo "== 逐个验证哪种写法能解析到真文件 =="
+          T="drivers/misc/mediatek/typec/tcpc/inc/tcpm.h"
+          for p in "$KROOT/kernel-4.19/$T" \
+                   "$KROOT/drivers/kernel-4.19/$T" \
+                   "$KROOT/../kernel-4.19/$T" \
+                   "$KROOT/../vendor/kernel-4.19/$T"; do
+            if [ -f "$p" ]; then echo "  OK   $p"; else echo "  MISS $p"; fi
+          done
+
       - name: 5. 配置 + 编译
         working-directory: kernel
         run: |
@@ -180,8 +207,7 @@ jobs:
           echo "== 生成 .config =="
           $MAKE "$DEF" 2>&1 | tail -5
 
-          echo "== 关掉 dtbo 覆盖层（cust.dtsi 未公开，编不了）=="
-          # arch/arm64/boot/dts/mediatek/Makefile:
+          echo "== 关掉 dtbo 覆盖层（cust.dtsi 未公开，编不了）=="          # arch/arm64/boot/dts/mediatek/Makefile:
           #   dtb-y += mt6833.dtb                      <- boot.img 的基座，不依赖 cust.dtsi
           #   dtb-y += oplus6833_20015.dtb ... (27 个)  <- dtbo 覆盖层，全都要 <项目号>/cust.dtsi
           # 而 164 个 dts 里 140 个都 include 了它，那些目录 OPPO 从未公开（来自 Android device 树）。
@@ -189,6 +215,19 @@ jobs:
           ./scripts/config --file out/.config -d BUILD_ARM64_DTB_OVERLAY_IMAGE
           $MAKE olddefconfig >/dev/null 2>&1 || true
           grep -E 'DTB_OVERLAY_IMAGE|APPENDED_DTB_IMAGE' out/.config || true
+
+          echo "== 补 vendor 模块缺的 include 路径 =="
+          # drivers/misc/mediatek/scp/rv/scp_feature_define.h 里是 #include "scp.h"，
+          # 而 scp.h 在 scp/include/ 下；OPPO 自己的 SCP Makefile 会加 -I，
+          # 但走 vendor 侧编译的 oplus_sensor_feedback 没有这个 -I。
+          KROOT="$(pwd)"
+          {
+            echo ''
+            echo '# --- injected by CI: 补齐供应商模块依赖的 include 路径 ---'
+            echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/scp/include"
+            echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/typec/tcpc/inc"
+          } >> Makefile
+          tail -4 Makefile
 
           echo "== 编译 =="
           $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -60
