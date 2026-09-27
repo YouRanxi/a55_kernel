@@ -160,7 +160,16 @@ jobs:
           if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
             printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
           fi
-          grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || true
+          # ★ 让原厂 /vendor/lib/modules/*.ko 能直接 insmod 进我们的内核（WiFi/蓝牙恢复）：
+          #   原厂模块 vermagic = "4.19.191+ SMP preempt mod_unload modversions aarch64"
+          #   1) 关掉强制验签（原厂模块是 OPPO 私钥签的，我们永远验不过）
+          #      → MODULE_SIG 保留，但 FORCE 关掉：未签名/他签模块按 tainted 加载
+          #   2) 版本串补 "+"：原厂内核是脏树构建（4.19.191+），我们的 git 克隆是干净的
+          #   3) MODVERSIONS 保留（两边同源码 → genksyms 的类型 CRC 理论一致；
+          #      若 dmesg 报 "disagrees about version of symbol" 再单独处理）
+          ./scripts/config --file "arch/arm64/configs/$DEF" -d CONFIG_MODULE_SIG_FORCE
+          ./scripts/config --file "arch/arm64/configs/$DEF" --set-str CONFIG_LOCALVERSION "+"
+          grep -nE 'CONFIG_KSU|MODULE_SIG_FORCE|CONFIG_LOCALVERSION' "arch/arm64/configs/$DEF" || true
           ls -d KernelSU KernelSU-Next drivers/kernelsu 2>/dev/null || true
 
       - name: 4.5 修 KernelSU-Next legacy 的守卫漏改（ksu_init_rc_hook 未定义）
