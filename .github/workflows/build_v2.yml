@@ -132,10 +132,16 @@ jobs:
               URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
               TAGS="v0.9.5" ;;
             kernelsu-next)
-              # Next 分支：自称支持 4.4~6.6，管理器与内核配套（原版 v0.9.5 的管理器在
-              # 本机 4.19 内核上报「不支持 / 只支持 GKI 内核」，见 DEBUG_LOG 第 82/83 条）
-              URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
-              TAGS="v3.4.0" ;;
+              # ★ 必须用 legacy 分支，不能用 dev：
+              #   dev 的 kernel/feature/sucompat.c 【无条件】include <linux/pgtable.h>，
+              #   而该头文件是 5.8 才从 asm/pgtable.h 拆出来的 —— 4.19 上直接
+              #   fatal error: 'linux/pgtable.h' file not found（run#14 就栽在这）。
+              #   legacy 分支有版本守卫：
+              #       #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+              #       #include <linux/pgtable.h>
+              #       #endif
+              URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh"
+              TAGS="legacy" ;;
             sukisu)
               URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
               TAGS="" ;;
