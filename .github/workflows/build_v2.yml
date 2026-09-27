@@ -139,11 +139,13 @@ jobs:
           set -o pipefail
           DEF="${{ steps.cfg.outputs.def }}"
           export ARCH=arm64
-          # KCFLAGS=-Wno-error：OPPO 供应商代码是按 Android 自带的老 clang 写的，
-          # 用新版 clang 编会出现一批 -Werror=xxx 的【风格告警】直接变错误
-          # （首个：sched_assist_slide_v1.c:129 old-style function definition
-          #  -Werror,-Wstrict-prototypes ）。-Wno-error 只降级告警，真错误照样报。
-          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error"
+          # KCFLAGS 注入的降级开关。注意：顶层 Makefile 里 KCFLAGS 在第 1007 行，
+          # 确实在 -Werror=xxx（982 行等）之后 —— 但【通用 -Wno-error 压不住 specific 的
+          # -Werror=strict-prototypes】，必须写成 -Wno-error=<名字> 才生效。
+          # 供应商代码按老 clang 写的，首个撞上的：
+          #   sched_assist_slide_v1.c:129  void f() {}  -> [-Werror,-Wstrict-prototypes]
+          # 只降级【纯风格】那一条，不动 incompatible-pointer-types 之类可能掩盖真 bug 的。
+          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
           echo "== 生成 .config =="
           $MAKE "$DEF" 2>&1 | tail -5
           echo "== 编译 =="
