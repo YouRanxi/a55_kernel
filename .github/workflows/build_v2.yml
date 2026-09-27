@@ -74,7 +74,8 @@ jobs:
           echo "== 修正仓库自带的 1 处错误链接 =="
           # drivers/base/kernelFwUpdate 的目标写成了 ../../../../vnd/vendor/...，
           # 多一个 OPPO 内部构建路径残留的 vnd/ 前缀；正确目标就在模块包里。
-          ln -sfn ../../../../vendor/oplus/kernel/touchpanel/kernelFwUpdate/ \
+          # 层级：kernel/drivers/base 往上 3 级 = 工作区根（与 drivers/power/oplus 同级同深度）
+          ln -sfn ../../../vendor/oplus/kernel/touchpanel/kernelFwUpdate/ \
                  kernel/drivers/base/kernelFwUpdate
           readlink kernel/drivers/base/kernelFwUpdate
           test -d kernel/drivers/base/kernelFwUpdate \
