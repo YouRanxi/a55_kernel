@@ -35,7 +35,10 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: 0. 环境信息
+      - name: 0. 检出本仓库（关键：boot.bin 就在这里）
+        uses: actions/checkout@v4
+
+      - name: 0.1 环境信息
         run: |
           echo "== CPU =="; nproc
           echo "== 内存 =="; free -h
@@ -255,10 +258,14 @@ jobs:
           mkdir -p /tmp/pack && cp ../boot.bin /tmp/pack/boot_orig.img
           cd /tmp/pack
           "$MB" unpack boot_orig.img
+          echo "== 原 boot.img 解出的段（应有 kernel / ramdisk / dtb 等）=="
+          ls -la
+          echo "== 原 kernel 段 vs 新内核 =="
+          ls -l kernel "$GITHUB_WORKSPACE/kernel/$IMAGE" 2>/dev/null || true
           cp "$GITHUB_WORKSPACE/kernel/$IMAGE" kernel
           echo "替换后内核大小: $(du -h kernel | cut -f1)"
           "$MB" repack boot_kernelsu.img
-          ls -la boot_kernelsu.img
+          ls -la boot_kernelsu.img boot_orig.img
           cp boot_kernelsu.img "$GITHUB_WORKSPACE/boot_kernelsu.img"
           cp boot_kernelsu.img "$GITHUB_WORKSPACE/kernel/kernel_image" 2>/dev/null || true
 
