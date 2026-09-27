@@ -273,17 +273,20 @@ jobs:
           FLAT="$GITHUB_WORKSPACE/modules_flat"
           rm -rf "$OUT" "$FLAT"; mkdir -p "$OUT" "$FLAT"
           cnt=0
+          # 坑：find 必须从 kernel/ 这一层找（cwd 就是 kernel/），
+          # 如果用 `(cd out && find . ...)` 拿到的 ./drivers/... 是相对 out/ 的，
+          # 回到 kernel/ 下 cp 就会 "cannot stat"。run#12 就栽在这。
           while IFS= read -r f; do
-            rel="${f#./}"
+            rel="${f#out/}"
             mkdir -p "$OUT/$(dirname "$rel")"
             cp "$f" "$OUT/$rel"
             cp "$f" "$FLAT/$(basename "$rel")"
             cnt=$((cnt+1))
-          done < <(cd out && find . -name '*.ko' | sort)
+          done < <(find out -name '*.ko' | sort)
           echo "共收集 $cnt 个 .ko"
           ls -la "$FLAT"
-          # modules.load：Android 启动时按这个清单 insmod
-          ls "$FLAT" | sort > "$FLAT/modules.load"
+          # modules.load：Android 启动时按这个清单 insmod（最后写，避免把自己列进去）
+          ls "$FLAT" | grep -v '^modules.load$' | sort > "$FLAT/modules.load"
           echo "== modules.load =="
           cat "$FLAT/modules.load"
 
