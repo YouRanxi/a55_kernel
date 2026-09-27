@@ -19,12 +19,13 @@ on:
         type: choice
         options:
           - kernelsu
+          - kernelsu-next
           - sukisu
           - none
       ksu_tag:
-        description: 'KernelSU 版本（非 GKI 内核必须用旧版；留空=v0.9.5）'
+        description: '版本（留空=按模式取默认：kernelsu→v0.9.5 / next→v3.4.0）'
         required: false
-        default: 'v0.9.5'
+        default: ''
 
 env:
   BRANCH: oppo/mt6833_t_13.0_a55_a53s_k9x_5g
@@ -127,19 +128,28 @@ jobs:
         working-directory: kernel
         run: |
           case "${{ github.event.inputs.ksu_mode }}" in
-            kernelsu) URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" ;;
-            sukisu)   URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" ;;
+            kernelsu)
+              URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+              TAGS="v0.9.5" ;;
+            kernelsu-next)
+              # Next 分支：自称支持 4.4~6.6，管理器与内核配套（原版 v0.9.5 的管理器在
+              # 本机 4.19 内核上报「不支持 / 只支持 GKI 内核」，见 DEBUG_LOG 第 82/83 条）
+              URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
+              TAGS="v3.4.0" ;;
+            sukisu)
+              URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
+              TAGS="" ;;
           esac
           TAG="${{ github.event.inputs.ksu_tag }}"
-          if [ -z "$TAG" ]; then TAG="v0.9.5"; fi
+          [ -n "$TAG" ] || TAG="$TAGS"
           echo "补丁来源: $URL"
-          echo "版本: $TAG"
-          # ★ 必须指定版本：不带参数时 setup.sh 取【最新 tag】，
+          echo "版本: ${TAG:-（最新 tag）}"
+          # ★ 原版必须指定版本：不带参数时 setup.sh 取【最新 tag】，
           #   而 KernelSU 自 v1.0 起已放弃非 GKI 内核 —— 会报
           #   drivers/kernelsu/core/init.c:244: error: a parameter list without types ...
           #   v0.9.5 是最后一批完整支持 4.14~4.19 非 GKI 的版本。
           curl -LSs "$URL" -o /tmp/ksu.sh
-          bash /tmp/ksu.sh "$TAG"
+          if [ -n "$TAG" ]; then bash /tmp/ksu.sh "$TAG"; else bash /tmp/ksu.sh; fi
           DEF="${{ steps.cfg.outputs.def }}"
           if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
             printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
@@ -290,6 +300,30 @@ jobs:
           echo "== modules.load =="
           cat "$FLAT/modules.load"
 
+      - name: 6.6 下载配套 Manager APK（用 CI 的网络，绕开本机被墙/代理不稳）
+        if: ${{ github.event.inputs.ksu_mode != 'none' }}
+        run: |
+          set -e
+          OUT="$GITHUB_WORKSPACE/manager_apk"
+          mkdir -p "$OUT"
+          case "${{ github.event.inputs.ksu_mode }}" in
+            kernelsu)      REPO="tiann/KernelSU" ;;
+            kernelsu-next) REPO="KernelSU-Next/KernelSU-Next" ;;
+            sukisu)        REPO="SukiSU-Ultra/SukiSU-Ultra" ;;
+          esac
+          echo "== 从 $REPO 取 release 里的 APK =="
+          curl -LSs -H 'Accept: application/vnd.github+json' \
+               -H "Authorization: Bearer ${{ github.token }}" \
+               "https://api.github.com/repos/$REPO/releases/latest" -o /tmp/rel.json
+          python3 -c "import json;d=json.load(open('/tmp/rel.json'));print('release =',d.get('tag_name'));[print(a['url'],a['name']) for a in d['assets'] if a['name'].lower().endswith('.apk')]" > /tmp/apks.txt
+          cat /tmp/apks.txt
+          grep -q '^https' /tmp/apks.txt || { echo "!! 没找到 APK 资产"; exit 0; }
+          while read -r U N; do
+            curl -LSs -H 'Accept: application/octet-stream' \
+                 -H "Authorization: Bearer ${{ github.token }}" "$U" -o "$OUT/$N"
+          done < <(grep '^https' /tmp/apks.txt)
+          ls -la "$OUT"
+
       - name: 7. 上传产物
         if: always()
         uses: actions/upload-artifact@v4
@@ -304,6 +338,7 @@ jobs:
             kernel/kernel_image
             modules_out/**
             modules_flat/**
+            manager_apk/**
 
       - name: 8. 失败时输出日志尾部
         if: failure()
