@@ -237,37 +237,31 @@ jobs:
           echo "== 产物 =="
           ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
 
-      - name: 6. 打包 boot.img
+      - name: 6. 打包 boot.img（用自带 mkboot.py，零外部依赖）
         working-directory: kernel
         run: |
+          set -e
           IMAGE=""
           for c in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
             [ -f "$c" ] && IMAGE="$c" && break
           done
           if [ -z "$IMAGE" ]; then echo "没找到内核镜像，跳过打包"; exit 0; fi
           echo "内核镜像: $IMAGE ($(du -h $IMAGE | cut -f1))"
+          cp "$IMAGE" ../kernel_image
+
           if [ ! -f ../boot.bin ]; then
-            echo "仓库根目录没有 boot.bin，只输出内核镜像"
-            cp "$IMAGE" ../kernel_image
-            exit 0
+            echo "仓库根目录没有 boot.bin，只输出内核镜像"; exit 0
           fi
-          curl -L -o /tmp/magisk.apk https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk
-          unzip -o -j /tmp/magisk.apk 'lib/arm64-v8a/libmagiskboot.so' -d /tmp >/dev/null
-          chmod +x /tmp/libmagiskboot.so
-          MB=/tmp/libmagiskboot.so
-          mkdir -p /tmp/pack && cp ../boot.bin /tmp/pack/boot_orig.img
-          cd /tmp/pack
-          "$MB" unpack boot_orig.img
-          echo "== 原 boot.img 解出的段（应有 kernel / ramdisk / dtb 等）=="
-          ls -la
-          echo "== 原 kernel 段 vs 新内核 =="
-          ls -l kernel "$GITHUB_WORKSPACE/kernel/$IMAGE" 2>/dev/null || true
-          cp "$GITHUB_WORKSPACE/kernel/$IMAGE" kernel
-          echo "替换后内核大小: $(du -h kernel | cut -f1)"
-          "$MB" repack boot_kernelsu.img
-          ls -la boot_kernelsu.img boot_orig.img
-          cp boot_kernelsu.img "$GITHUB_WORKSPACE/boot_kernelsu.img"
-          cp boot_kernelsu.img "$GITHUB_WORKSPACE/kernel/kernel_image" 2>/dev/null || true
+
+          echo "=========== 原始 boot.bin 结构 ==========="
+          python3 ../mkboot.py --info ../boot.bin
+
+          echo "=========== 替换 kernel 段 ==========="
+          python3 ../mkboot.py ../boot.bin "$IMAGE" "$GITHUB_WORKSPACE/boot_kernelsu.img"
+
+          echo "=========== 生成结果复验 ==========="
+          python3 ../mkboot.py --info "$GITHUB_WORKSPACE/boot_kernelsu.img"
+          ls -la "$GITHUB_WORKSPACE/boot_kernelsu.img" ../boot.bin
 
       - name: 7. 上传产物
         if: always()
