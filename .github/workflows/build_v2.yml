@@ -1,0 +1,173 @@
+name: Build A55 Kernel v2 (with OPPO vendor tree)
+
+# v2 相对 v1 的两处关键修正（都是「一个原因」的必然结果：vendor 树是公开的）
+#   1. 用 git clone 代替下载 zip —— zip 会把 82 个符号链接压成 59 字节的文本文件
+#   2. 把模块仓库克隆成与 kernel/ 平级的 vendor/ —— 断链是相对 Android 源码树根写的
+# 原理见 DEBUG_LOG.md 第 81 条。
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'defconfig 名字（留空=自动选 k6833v1_64_k419_defconfig）'
+        required: false
+        default: 'k6833v1_64_k419_defconfig'
+      ksu_mode:
+        description: 'KernelSU 模式'
+        required: true
+        default: 'sukisu'
+        type: choice
+        options:
+          - sukisu
+          - kernelsu
+          - none
+
+env:
+  BRANCH: oppo/mt6833_t_13.0_a55_a53s_k9x_5g
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 0. 环境信息
+        run: |
+          echo "== CPU =="; nproc
+          echo "== 内存 =="; free -h
+          echo "== 磁盘 =="; df -h /
+          lsb_release -a || cat /etc/os-release
+
+      - name: 1. 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip python3 git curl wget cpio kmod rsync \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            clang llvm lld
+          clang --version | head -2
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: 2. 克隆内核源码 + OPPO vendor 树（保留符号链接）
+        run: |
+          set -e
+          echo "== 克隆内核（约 296 MB，depth=1）=="
+          git clone --depth 1 -b "$BRANCH" \
+            https://github.com/oppo-source/android_kernel_oppo_mt6833.git kernel
+
+          echo "== 克隆 OPPO 模块/vendor 树（约 254 MB，depth=1）=="
+          git clone --depth 1 -b "$BRANCH" \
+            https://github.com/oppo-source/android_kernel_modules_oppo_mt6833.git vendor
+
+          echo "== 内核版本 =="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) *=' kernel/Makefile
+
+          echo "== 符号链接是否被 git 正确还原（期望是 'l' 开头的 link）=="
+          ls -ld kernel/mm/multi_freearea.h kernel/include/linux/sched_assist kernel/kernel/sched_assist
+
+          echo "== 断链自检：全树悬空符号链接数（期望 0 或极少）=="
+          python3 - <<'PY'
+          import os
+          bad=[]; total=0
+          for dp,dn,fn in os.walk('kernel'):
+              for f in list(dn)+fn:
+                  p=os.path.join(dp,f)
+                  if os.path.islink(p):
+                      total+=1
+                      if not os.path.exists(p): bad.append(p)
+          print('符号链接总数 =',total,'  悬空 =',len(bad))
+          for b in bad[:20]: print('   DANGLING',b, '->', os.readlink(b))
+          PY
+
+      - name: 3. 确认 defconfig
+        id: cfg
+        working-directory: kernel
+        run: |
+          DEF="${{ github.event.inputs.defconfig }}"
+          if [ -z "$DEF" ]; then DEF="k6833v1_64_k419_defconfig"; fi
+          if [ ! -f "arch/arm64/configs/$DEF" ]; then
+            echo "!! 找不到 $DEF，列出现有 6833 的："; ls arch/arm64/configs/ | grep 6833; exit 1
+          fi
+          echo "选用 defconfig = $DEF"
+          echo "def=$DEF" >> $GITHUB_OUTPUT
+
+      - name: 4. 打 KernelSU / SukiSU 补丁
+        if: ${{ github.event.inputs.ksu_mode != 'none' }}
+        working-directory: kernel
+        run: |
+          case "${{ github.event.inputs.ksu_mode }}" in
+            kernelsu) URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" ;;
+            sukisu)   URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" ;;
+          esac
+          echo "补丁来源: $URL"
+          curl -LSs "$URL" -o /tmp/ksu.sh
+          bash /tmp/ksu.sh
+          DEF="${{ steps.cfg.outputs.def }}"
+          if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
+            printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
+          fi
+          grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || true
+          ls -d KernelSU drivers/kernelsu 2>/dev/null || true
+
+      - name: 5. 配置 + 编译
+        working-directory: kernel
+        run: |
+          set -o pipefail
+          DEF="${{ steps.cfg.outputs.def }}"
+          export ARCH=arm64
+          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          echo "== 生成 .config =="
+          $MAKE "$DEF" 2>&1 | tail -5
+          echo "== 编译 =="
+          $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -60
+          echo "== 产物 =="
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
+
+      - name: 6. 打包 boot.img
+        working-directory: kernel
+        run: |
+          IMAGE=""
+          for c in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+            [ -f "$c" ] && IMAGE="$c" && break
+          done
+          if [ -z "$IMAGE" ]; then echo "没找到内核镜像，跳过打包"; exit 0; fi
+          echo "内核镜像: $IMAGE ($(du -h $IMAGE | cut -f1))"
+          if [ ! -f ../boot.bin ]; then
+            echo "仓库根目录没有 boot.bin，只输出内核镜像"
+            cp "$IMAGE" ../kernel_image
+            exit 0
+          fi
+          curl -L -o /tmp/magisk.apk https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk
+          unzip -o -j /tmp/magisk.apk 'lib/arm64-v8a/libmagiskboot.so' -d /tmp >/dev/null
+          chmod +x /tmp/libmagiskboot.so
+          MB=/tmp/libmagiskboot.so
+          mkdir -p /tmp/pack && cp ../boot.bin /tmp/pack/boot_orig.img
+          cd /tmp/pack
+          "$MB" unpack boot_orig.img
+          cp "$GITHUB_WORKSPACE/kernel/$IMAGE" kernel
+          echo "替换后内核大小: $(du -h kernel | cut -f1)"
+          "$MB" repack boot_kernelsu.img
+          ls -la boot_kernelsu.img
+          cp boot_kernelsu.img "$GITHUB_WORKSPACE/boot_kernelsu.img"
+          cp boot_kernelsu.img "$GITHUB_WORKSPACE/kernel/kernel_image" 2>/dev/null || true
+
+      - name: 7. 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a55-kernel-v2
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            kernel/out/arch/arm64/boot/*
+            kernel/build.log
+            boot_kernelsu.img
+            kernel/kernel_image
+
+      - name: 8. 失败时输出日志尾部
+        if: failure()
+        working-directory: kernel
+        run: |
+          echo "=========== build.log 最后 100 行 ==========="
+          tail -100 build.log 2>/dev/null || echo "(没有 build.log)"
