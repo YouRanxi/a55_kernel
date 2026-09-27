@@ -374,6 +374,45 @@ jobs:
           done < <(grep '^https' /tmp/apks.txt)
           ls -la "$OUT"
 
+      - name: 6.7 编译 MTK 连接驱动模块（修复 WiFi/蓝牙）
+        run: |
+          # 根因（2026-09-28 实测）：MTK 的 WiFi/BT 驱动不在内核里，是原厂放在
+          # /vendor/lib/modules/ 的 .ko（wmt_drv/wlan_drv_gen4m/bt_drv_connac1x/...），
+          # 开机由 init.rc insmod 加载。原厂模块按原厂内核编译，我们的内核
+          # CONFIG_MODVERSIONS=y + MODULE_SIG_FORCE=y → 拒载 → 无 /dev/wmtdetect
+          # → wmt_loader 无限重试 → WiFi+蓝牙全挂。
+          # 修法：用【我们的内核】把这套模块重编出来（自动带我们的签名）。
+          set -o pipefail
+          MODDIR="$GITHUB_WORKSPACE/vendor/mediatek/kernel_modules/connectivity"
+          KSRC="$GITHUB_WORKSPACE/kernel"
+          KOUT="$KSRC/out"
+          OUTDIR="$GITHUB_WORKSPACE/conn_modules"
+          mkdir -p "$OUTDIR"
+          # 参数实测来源：手机 getprop + 内核 /proc/config.gz
+          export MTK_PLATFORM=mt6853          # 注意：k6833v1_64 项目的平台串是 mt6853
+          export CONFIG_MTK_PLATFORM=mt6853
+          export MTK_PLATFORM_WMT=mt6853
+          export TARGET_BOARD_PLATFORM=mt6833
+          export TARGET_BOARD_PLATFORM_WMT=mt6833
+          export MTK_CONSYS_ADIE=MT6631       # 首轮猜测值，失败按报错迭代
+          export WLAN_CHIP_ID=6853            # gen4m: CONFIG_MTK_PLATFORM=mt$(WLAN_CHIP_ID)
+          export TARGET_BUILD_VARIANT=user
+          export KERNEL_OUT="$KOUT"
+          MAKEARGS="ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error=strict-prototypes"
+          build_mod() {
+            local NAME="$1"; local M="$2"
+            echo "======== $NAME (M=$M) ========"
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tail -15
+          }
+          build_mod conninfra        "$MODDIR/conninfra"        || true
+          build_mod connfem          "$MODDIR/connfem"          || true
+          build_mod wmt_drv          "$MODDIR/common"           || true
+          build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
+          build_mod bt_wmt           "$MODDIR/bt/mt66xx/wmt"    || true
+          echo "======== 收集 .ko ========"
+          find "$MODDIR" -name '*.ko' -exec cp -v {} "$OUTDIR/" \; 2>/dev/null | head
+          ls -la "$OUTDIR"
+
       - name: 7. 上传产物
         if: always()
         uses: actions/upload-artifact@v4
@@ -389,6 +428,7 @@ jobs:
             modules_out/**
             modules_flat/**
             manager_apk/**
+            conn_modules/**
 
       - name: 8. 失败时输出日志尾部
         if: failure()
