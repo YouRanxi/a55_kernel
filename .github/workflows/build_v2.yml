@@ -163,6 +163,40 @@ jobs:
           grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || true
           ls -d KernelSU drivers/kernelsu 2>/dev/null || true
 
+      - name: 4.5 修 KernelSU-Next legacy 的守卫漏改（ksu_init_rc_hook 未定义）
+        if: ${{ github.event.inputs.ksu_mode == 'kernelsu-next' }}
+        working-directory: kernel
+        run: |
+          # 上游 bug：ksu_init_rc_hook 只在 #else（非 KPROBES）分支里定义，
+          # 却在 ksu_handle_sys_read() 里被【无条件】使用。
+          # 我们走 kprobe 模式（KSU_KPROBES_HOOK 已定义）→ #else 被跳过 →
+          #   error: use of undeclared identifier 'ksu_init_rc_hook'
+          # 修法：补一个对称定义，让两种配置下都恰好定义一次（不会重复定义）。
+          F=KernelSU/kernel/runtime/ksud_integration.c
+          echo "---- 修补前 ----"
+          grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
+          python3 - "$F" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          anchor = ("static DECLARE_COMPLETION(stop_input_hook_work_complete);\n"
+                    "#else\n"
+                    "bool ksu_init_rc_hook __read_mostly = true;\n"
+                    "#endif")
+          add = ("\n#ifdef KSU_KPROBES_HOOK\n"
+                 "bool ksu_init_rc_hook __read_mostly = true;\n"
+                 "#endif")
+          if add.strip() in s:
+              print('已经补过了，跳过')
+          elif anchor in s:
+              open(p, 'w', encoding='utf-8').write(s.replace(anchor, anchor + add, 1))
+              print('PATCHED OK')
+          else:
+              print('!! 锚点未命中（上游可能已改）—— 不改，让编译失败暴露真相')
+          PY
+          echo "---- 修补后 ----"
+          grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
+
       - name: 4.6 解除供应商子目录 Makefile 里的「通用 -Werror」
         run: |
           # 为什么 KCFLAGS=-Wno-error 不够：
