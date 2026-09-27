@@ -413,6 +413,21 @@ jobs:
           # HIF=AXI 的铁证：原厂 wlan_drv_gen4m.ko 二进制里 "axi" 出现 20 次，sdio/pcie 均为 0
           export CONFIG_MTK_COMBO_WIFI_HIF=axi
           export WLAN_CHIP_ID=6853
+          # gen4m 的 gl_qa_agent.h 用到 LIST_SEG_MAX，但公开源码树里没有定义
+          # （大概率是 OPPO 源码公开时漏了个私有头）。该结构只用于 QA 工具（HQA list mode），
+          # 正常联网功能不使用。兜底定义让编译通过；值取保守的 8。
+          QAH="$MODDIR/wlan/core/gen4m/os/linux/include/gl_qa_agent.h"
+          python3 - "$QAH" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'define LIST_SEG_MAX' in s:
+              print('已补过，跳过')
+          else:
+              open(p, 'w', encoding='utf-8').write(
+                  '#ifndef LIST_SEG_MAX\n#define LIST_SEG_MAX 8\n#endif\n' + s)
+              print('PATCHED LIST_SEG_MAX fallback')
+          PY
           build_mod wmt_chrdev_wifi  "$MODDIR/wlan/adaptor"     || true
           build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
