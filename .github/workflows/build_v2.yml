@@ -161,7 +161,7 @@ jobs:
             printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
           fi
           grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEF" || true
-          ls -d KernelSU drivers/kernelsu 2>/dev/null || true
+          ls -d KernelSU KernelSU-Next drivers/kernelsu 2>/dev/null || true
 
       - name: 4.5 修 KernelSU-Next legacy 的守卫漏改（ksu_init_rc_hook 未定义）
         if: ${{ github.event.inputs.ksu_mode == 'kernelsu-next' }}
@@ -172,7 +172,17 @@ jobs:
           # 我们走 kprobe 模式（KSU_KPROBES_HOOK 已定义）→ #else 被跳过 →
           #   error: use of undeclared identifier 'ksu_init_rc_hook'
           # 修法：补一个对称定义，让两种配置下都恰好定义一次（不会重复定义）。
-          F=KernelSU/kernel/runtime/ksud_integration.c
+          # 注意目录名：原版 setup.sh 克隆到 KernelSU/，Next 的克隆到 KernelSU-Next/
+          # （它的 REPO="$OWNER"）。用通配覆盖两者，别再写死。
+          F=$(ls KernelSU*/kernel/runtime/ksud_integration.c 2>/dev/null | head -1)
+          if [ -z "$F" ]; then
+            echo "!! 找不到 ksud_integration.c —— 先列出候选再失败（别浪费 20 分钟编译）"
+            ls -d KernelSU* 2>/dev/null || echo "(没有 KernelSU* 目录)"
+            find . -maxdepth 4 -name 'ksud_integration.c' 2>/dev/null | head
+            ls -la drivers/kernelsu 2>/dev/null | head -3
+            exit 1
+          fi
+          echo "目标文件: $F"
           echo "---- 修补前 ----"
           grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
           python3 - "$F" <<'PY'
