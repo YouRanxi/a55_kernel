@@ -15,12 +15,16 @@ on:
       ksu_mode:
         description: 'KernelSU 模式'
         required: true
-        default: 'sukisu'
+        default: 'kernelsu'
         type: choice
         options:
-          - sukisu
           - kernelsu
+          - sukisu
           - none
+      ksu_tag:
+        description: 'KernelSU 版本（非 GKI 内核必须用旧版；留空=v0.9.5）'
+        required: false
+        default: 'v0.9.5'
 
 env:
   BRANCH: oppo/mt6833_t_13.0_a55_a53s_k9x_5g
@@ -123,9 +127,16 @@ jobs:
             kernelsu) URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" ;;
             sukisu)   URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" ;;
           esac
+          TAG="${{ github.event.inputs.ksu_tag }}"
+          if [ -z "$TAG" ]; then TAG="v0.9.5"; fi
           echo "补丁来源: $URL"
+          echo "版本: $TAG"
+          # ★ 必须指定版本：不带参数时 setup.sh 取【最新 tag】，
+          #   而 KernelSU 自 v1.0 起已放弃非 GKI 内核 —— 会报
+          #   drivers/kernelsu/core/init.c:244: error: a parameter list without types ...
+          #   v0.9.5 是最后一批完整支持 4.14~4.19 非 GKI 的版本。
           curl -LSs "$URL" -o /tmp/ksu.sh
-          bash /tmp/ksu.sh
+          bash /tmp/ksu.sh "$TAG"
           DEF="${{ steps.cfg.outputs.def }}"
           if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
             printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
@@ -168,6 +179,17 @@ jobs:
           MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
           echo "== 生成 .config =="
           $MAKE "$DEF" 2>&1 | tail -5
+
+          echo "== 关掉 dtbo 覆盖层（cust.dtsi 未公开，编不了）=="
+          # arch/arm64/boot/dts/mediatek/Makefile:
+          #   dtb-y += mt6833.dtb                      <- boot.img 的基座，不依赖 cust.dtsi
+          #   dtb-y += oplus6833_20015.dtb ... (27 个)  <- dtbo 覆盖层，全都要 <项目号>/cust.dtsi
+          # 而 164 个 dts 里 140 个都 include 了它，那些目录 OPPO 从未公开（来自 Android device 树）。
+          # 我们只替换内核、不动 dtbo 分区，所以直接关掉覆盖层，保留基座。
+          ./scripts/config --file out/.config -d BUILD_ARM64_DTB_OVERLAY_IMAGE
+          $MAKE olddefconfig >/dev/null 2>&1 || true
+          grep -E 'DTB_OVERLAY_IMAGE|APPENDED_DTB_IMAGE' out/.config || true
+
           echo "== 编译 =="
           $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -60
           echo "== 产物 =="
