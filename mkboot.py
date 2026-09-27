@@ -80,18 +80,15 @@ def repack(src, newkernel, out):
     hdr = bytearray(orig[:hsz])
     struct.pack_into('<I', hdr, 8, nks)                 # kernel_size
 
-    # id = SHA1(kernel|size|ramdisk|size|second|size[|dtb|size])，AOSP mkbootimg 口径
-    sha = hashlib.sha1()
-    sha.update(kernel)
-    sha.update(struct.pack('<I', nks))
-    sha.update(ramdisk)
-    sha.update(struct.pack('<I', rs))
-    sha.update(second)
-    sha.update(struct.pack('<I', ss))
-    if d['header_version'] >= 2:
-        sha.update(dtb)
-        sha.update(struct.pack('<I', dtbs))
-    hdr[576:608] = sha.digest()
+    # id 字段（偏移 576..608）：【原样保留，不重算】。
+    #   实测原厂 boot.img 的 id = 20 字节 SHA1 + 12 字节 0，且与 AOSP mkbootimg 的
+    #   SHA1(kernel|size|ramdisk|size|second|size|dtb|size) 口径【对不上】——
+    #   MTK 用的是另一套算法。magiskboot 也是原样搬运，实测自定义内核能正常启动。
+    #   反面教材（我踩过）：hdr[576:608] = sha1.digest() 会让 bytearray 缩 12 字节
+    #   （20 字节赋给 32 字节切片），导致后面所有内容错位，镜像全废。
+    orig_id = bytes(hdr[576:608])
+
+    assert len(hdr) == hsz, 'header 长度被改动了：%d != %d' % (len(hdr), hsz)
 
     # --- 拼装 ---
     img = bytearray()
@@ -126,10 +123,39 @@ def repack(src, newkernel, out):
     print('ramdisk   : %d 字节（原样保留）' % rs)
     print('dtb 段    : %d 字节（原样保留，含 MTK 64 字节头）' % dtbs)
     print('镜像大小  : %d -> %d 字节' % (len(orig), len(img)))
-    print('新 id     : %s' % sha.hexdigest())
+    print('id        : %s（原样保留）' % orig_id[:20].hex())
+
+
+def show_info(path):
+    b = open(path, 'rb').read()
+    d = parse(b)
+    lo = layout(d)
+    print('文件      : %s' % path)
+    print('大小      : %d 字节' % len(b))
+    print('header    : version=%d size=%d page_size=%d'
+          % (d['header_version'], d['header_size'], d['page_size']))
+    print('kernel    : %d 字节 @ %d' % (d['kernel_size'], lo['kernel']))
+    print('ramdisk   : %d 字节 @ %d' % (d['ramdisk_size'], lo['ramdisk']))
+    print('second    : %d 字节 @ %d' % (d['second_size'], lo['second']))
+    print('recdtbo   : %d 字节 @ %d' % (d['recovery_dtbo_size'], lo['recdtbo']))
+    print('dtb       : %d 字节 @ %d' % (d['dtb_size'], lo['dtb']))
+    # 段首魔数自检
+    k = b[lo['kernel']:lo['kernel'] + 4]
+    print('kernel 首 4 字节 : %s %s' % (k.hex(' '), '(gzip OK)' if k[:2] == b'\x1f\x8b' else '(非 gzip?)'))
+    if d['dtb_size']:
+        dt = b[lo['dtb']:lo['dtb'] + 80]
+        mtk = dt[:4].hex(' ')
+        fdt_at = dt.find(b'\xd0\x0d\xfe\xed')
+        print('dtb MTK 头魔数   : %s' % mtk)
+        print('dtb 内 FDT 魔数位置(相对 dtb 起点): %s' % fdt_at)
+    print('段结束偏移        : %d，之后是空洞/AVB 尾部' % lo['end'])
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        raise SystemExit('用法: mkboot.py <原boot.img> <新内核> <输出boot.img>')
-    repack(sys.argv[1], sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 3 and sys.argv[1] == '--info':
+        show_info(sys.argv[2])
+    elif len(sys.argv) == 4:
+        repack(sys.argv[1], sys.argv[2], sys.argv[3])
+    else:
+        raise SystemExit('用法:\n  mkboot.py --info <boot.img>\n'
+                         '  mkboot.py <原boot.img> <新内核> <输出boot.img>')
