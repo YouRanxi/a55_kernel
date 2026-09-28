@@ -303,6 +303,7 @@ jobs:
           ccflags-y += -I$(srctree)/drivers/misc/mediatek/emi/mt6853
           ccflags-y += -I$(srctree)/drivers/misc/mediatek/emi
           ccflags-y += -I$(srctree)/drivers/misc/mediatek/emi/submodule
+          ccflags-y += -I$(srctree)/include/memory/mediatek
 
           obj-y += mpu_platform.o
           obj-y += ../emi_ctrl_v1.o
