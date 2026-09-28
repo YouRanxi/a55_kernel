@@ -427,7 +427,7 @@ jobs:
           build_mod() {
             local NAME="$1"; local M="$2"
             echo "======== $NAME (M=$M) ========"
-            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tail -15
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tail -60
           }
           build_mod conninfra        "$MODDIR/conninfra"        || true
           build_mod connfem          "$MODDIR/connfem"          || true
@@ -502,20 +502,19 @@ jobs:
               print('已补过，跳过')
           else:
               lines = s.split('\n')
-              # 插到文件头 include 块之后（文件作用域；插进函数体会报
-              # "function definition is not allowed here"）
-              last_inc = -1
-              for idx in range(min(300, len(lines))):
-                  if lines[idx].lstrip().startswith('#include'):
-                      last_inc = idx
+              # 锚点：文件级全局变量（恒编译）。上一版插到文件头 include 块之后，
+              # 但那个位置包在 #if (CFG_SUPPORT_CONNINFRA==1) 里，宏不成立时整段被
+              # 预处理掉 → 符号仍未定义。这里选不受任何 #if 保护的文件作用域位置。
+              anchor = 'int g_u4HaltFlag;'
+              idx = next((k for k, l in enumerate(lines) if anchor in l), None)
               stub = ('/* 公开树缺失的私有 glue：EMI MPU 保护（安全加固非必需），空实现 */\n'
                       'static void kalSetEmiMpuProtection(phys_addr_t base, bool en) { }')
-              if last_inc < 0:
-                  print('!! 没找到 include 块，跳过')
+              if idx is None:
+                  print('!! 锚点未命中，跳过')
               else:
-                  lines.insert(last_inc + 1, stub)
+                  lines.insert(idx + 1, stub)
                   open(p, 'w', encoding='utf-8').write('\n'.join(lines))
-                  print('PATCHED kalSetEmiMpuProtection stub (file scope, after line %d)' % (last_inc + 1))
+                  print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
           # -ferror-limit=0：clang 一次报出所有缺失符号（写进模块 Makefile，避免 shell 引号问题）
