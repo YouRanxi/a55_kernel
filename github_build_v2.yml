@@ -1,0 +1,768 @@
+name: Build A55 Kernel v2 (with OPPO vendor tree)
+
+# v2 相对 v1 的两处关键修正（都是「一个原因」的必然结果：vendor 树是公开的）
+#   1. 用 git clone 代替下载 zip —— zip 会把 82 个符号链接压成 59 字节的文本文件
+#   2. 把模块仓库克隆成与 kernel/ 平级的 vendor/ —— 断链是相对 Android 源码树根写的
+# 原理见 DEBUG_LOG.md 第 81 条。
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'defconfig 名字（留空=自动选 k6833v1_64_k419_defconfig）'
+        required: false
+        default: 'k6833v1_64_k419_defconfig'
+      ksu_mode:
+        description: 'KernelSU 模式'
+        required: true
+        default: 'kernelsu'
+        type: choice
+        options:
+          - kernelsu
+          - kernelsu-next
+          - sukisu
+          - none
+      ksu_tag:
+        description: '版本（留空=按模式取默认：kernelsu→v0.9.5 / next→v3.4.0）'
+        required: false
+        default: ''
+
+env:
+  BRANCH: oppo/mt6833_t_13.0_a55_a53s_k9x_5g
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 0. 检出本仓库（关键：boot.bin 就在这里）
+        uses: actions/checkout@v4
+
+      - name: 0.1 环境信息
+        run: |
+          echo "== CPU =="; nproc
+          echo "== 内存 =="; free -h
+          echo "== 磁盘 =="; df -h /
+          lsb_release -a || cat /etc/os-release
+
+      - name: 1. 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip python3 git curl wget cpio kmod rsync \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            clang llvm lld
+          clang --version | head -2
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: 2. 克隆内核源码 + OPPO vendor 树（保留符号链接）
+        run: |
+          set -e
+          echo "== 克隆内核（约 296 MB，depth=1）=="
+          git clone --depth 1 -b "$BRANCH" \
+            https://github.com/oppo-source/android_kernel_oppo_mt6833.git kernel
+
+          echo "== 克隆 OPPO 模块/vendor 树（约 254 MB，depth=1）=="
+          # 注意：该仓库的【根目录本身就是 vendor/】，所以必须先克隆到临时目录，
+          #       再把它的 vendor/ 搬到与 kernel/ 平级的位置。
+          #       直接 git clone ... ./vendor 会得到 ./vendor/vendor/oplus/... —— 差一层，
+          #       表现为「符号链接全部悬空」，本次 run#1 就是栽在这。
+          git clone --depth 1 -b "$BRANCH" \
+            https://github.com/oppo-source/android_kernel_modules_oppo_mt6833.git /tmp/oplus-mods
+          mv /tmp/oplus-mods/vendor ./vendor
+          rm -rf /tmp/oplus-mods
+
+          echo "== 布局自检（快速失败：位置不对就别浪费 40 分钟去编译）=="
+          test -f vendor/oplus/kernel/oplus_performance/sched_assist/sched_assist_mutex.h \
+            || { echo "!! vendor 树不在正确位置（应为 <workspace>/vendor/oplus/...）"; exit 1; }
+          echo "OK  vendor 树就位"
+
+          echo "== 修正仓库自带的 1 处错误链接 =="
+          # drivers/base/kernelFwUpdate 的目标写成了 ../../../../vnd/vendor/...，
+          # 多一个 OPPO 内部构建路径残留的 vnd/ 前缀；正确目标就在模块包里。
+          # 层级：kernel/drivers/base 往上 3 级 = 工作区根（与 drivers/power/oplus 同级同深度）
+          ln -sfn ../../../vendor/oplus/kernel/touchpanel/kernelFwUpdate/ \
+                 kernel/drivers/base/kernelFwUpdate
+          readlink kernel/drivers/base/kernelFwUpdate
+          test -d kernel/drivers/base/kernelFwUpdate \
+            && echo "OK  kernelFwUpdate 已接上" || { echo "!! 仍未接上"; exit 1; }
+
+          echo "== 内核版本 =="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) *=' kernel/Makefile
+
+          echo "== 符号链接是否被 git 正确还原（期望是 'l' 开头的 link）=="
+          ls -ld kernel/mm/multi_freearea.h kernel/include/linux/sched_assist kernel/kernel/sched_assist
+
+          echo "== 断链自检：全树悬空符号链接数（期望 0 或极少）=="
+          python3 - <<'PY'
+          import os, sys
+          bad=[]; total=0
+          for dp,dn,fn in os.walk('kernel'):
+              for f in list(dn)+fn:
+                  p=os.path.join(dp,f)
+                  if os.path.islink(p):
+                      total+=1
+                      if not os.path.exists(p): bad.append(p)
+          print('符号链接总数 =',total,'  悬空 =',len(bad))
+          for b in bad[:20]: print('   DANGLING',b, '->', os.readlink(b))
+          if len(bad) > 0:
+              print('!! 悬空链接过多，vendor 树没接上，直接中止'); sys.exit(1)
+          PY
+
+      - name: 3. 确认 defconfig
+        id: cfg
+        working-directory: kernel
+        run: |
+          DEF="${{ github.event.inputs.defconfig }}"
+          if [ -z "$DEF" ]; then DEF="k6833v1_64_k419_defconfig"; fi
+          if [ ! -f "arch/arm64/configs/$DEF" ]; then
+            echo "!! 找不到 $DEF，列出现有 6833 的："; ls arch/arm64/configs/ | grep 6833; exit 1
+          fi
+          echo "选用 defconfig = $DEF"
+          echo "def=$DEF" >> $GITHUB_OUTPUT
+
+      - name: 4. 打 KernelSU / SukiSU 补丁
+        if: ${{ github.event.inputs.ksu_mode != 'none' }}
+        working-directory: kernel
+        run: |
+          case "${{ github.event.inputs.ksu_mode }}" in
+            kernelsu)
+              URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+              TAGS="v0.9.5" ;;
+            kernelsu-next)
+              # ★ 必须用 legacy 分支，不能用 dev：
+              #   dev 的 kernel/feature/sucompat.c 【无条件】include <linux/pgtable.h>，
+              #   而该头文件是 5.8 才从 asm/pgtable.h 拆出来的 —— 4.19 上直接
+              #   fatal error: 'linux/pgtable.h' file not found（run#14 就栽在这）。
+              #   legacy 分支有版本守卫：
+              #       #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+              #       #include <linux/pgtable.h>
+              #       #endif
+              URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh"
+              TAGS="legacy" ;;
+            sukisu)
+              URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
+              TAGS="" ;;
+          esac
+          TAG="${{ github.event.inputs.ksu_tag }}"
+          [ -n "$TAG" ] || TAG="$TAGS"
+          echo "补丁来源: $URL"
+          echo "版本: ${TAG:-（最新 tag）}"
+          # ★ 原版必须指定版本：不带参数时 setup.sh 取【最新 tag】，
+          #   而 KernelSU 自 v1.0 起已放弃非 GKI 内核 —— 会报
+          #   drivers/kernelsu/core/init.c:244: error: a parameter list without types ...
+          #   v0.9.5 是最后一批完整支持 4.14~4.19 非 GKI 的版本。
+          curl -LSs "$URL" -o /tmp/ksu.sh
+          if [ -n "$TAG" ]; then bash /tmp/ksu.sh "$TAG"; else bash /tmp/ksu.sh; fi
+          DEF="${{ steps.cfg.outputs.def }}"
+          if ! grep -q '^CONFIG_KSU=y' "arch/arm64/configs/$DEF"; then
+            printf '\n# KernelSU (non-GKI)\nCONFIG_KSU=y\n' >> "arch/arm64/configs/$DEF"
+          fi
+          # ★ 让原厂 /vendor/lib/modules/*.ko 能直接 insmod 进我们的内核（WiFi/蓝牙恢复）：
+          #   原厂模块 vermagic = "4.19.191+ SMP preempt mod_unload modversions aarch64"
+          #   1) 关掉强制验签（原厂模块是 OPPO 私钥签的，我们永远验不过）
+          #      → MODULE_SIG 保留，但 FORCE 关掉：未签名/他签模块按 tainted 加载
+          #   2) 版本串补 "+"：原厂内核是脏树构建（4.19.191+），我们的 git 克隆是干净的
+          #   3) MODVERSIONS 保留（两边同源码 → genksyms 的类型 CRC 理论一致；
+          #      若 dmesg 报 "disagrees about version of symbol" 再单独处理）
+          ./scripts/config --file "arch/arm64/configs/$DEF" -d CONFIG_MODULE_SIG_FORCE
+          ./scripts/config --file "arch/arm64/configs/$DEF" --set-str CONFIG_LOCALVERSION "+"
+          grep -nE 'CONFIG_KSU|MODULE_SIG_FORCE|CONFIG_LOCALVERSION' "arch/arm64/configs/$DEF" || true
+          ls -d KernelSU KernelSU-Next drivers/kernelsu 2>/dev/null || true
+
+      - name: 4.5 修 KernelSU-Next legacy 的守卫漏改（ksu_init_rc_hook 未定义）
+        if: ${{ github.event.inputs.ksu_mode == 'kernelsu-next' }}
+        working-directory: kernel
+        run: |
+          # 上游 bug：ksu_init_rc_hook 只在 #else（非 KPROBES）分支里定义，
+          # 却在 ksu_handle_sys_read() 里被【无条件】使用。
+          # 我们走 kprobe 模式（KSU_KPROBES_HOOK 已定义）→ #else 被跳过 →
+          #   error: use of undeclared identifier 'ksu_init_rc_hook'
+          # 修法：补一个对称定义，让两种配置下都恰好定义一次（不会重复定义）。
+          # 注意目录名：原版 setup.sh 克隆到 KernelSU/，Next 的克隆到 KernelSU-Next/
+          # （它的 REPO="$OWNER"）。用通配覆盖两者，别再写死。
+          F=$(ls KernelSU*/kernel/runtime/ksud_integration.c 2>/dev/null | head -1)
+          if [ -z "$F" ]; then
+            echo "!! 找不到 ksud_integration.c —— 先列出候选再失败（别浪费 20 分钟编译）"
+            ls -d KernelSU* 2>/dev/null || echo "(没有 KernelSU* 目录)"
+            find . -maxdepth 4 -name 'ksud_integration.c' 2>/dev/null | head
+            ls -la drivers/kernelsu 2>/dev/null | head -3
+            exit 1
+          fi
+          echo "目标文件: $F"
+          echo "---- 修补前 ----"
+          grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
+          python3 - "$F" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          anchor = ("static DECLARE_COMPLETION(stop_input_hook_work_complete);\n"
+                    "#else\n"
+                    "bool ksu_init_rc_hook __read_mostly = true;\n"
+                    "#endif")
+          add = ("\n#ifdef KSU_KPROBES_HOOK\n"
+                 "bool ksu_init_rc_hook __read_mostly = true;\n"
+                 "#endif")
+          if add.strip() in s:
+              print('已经补过了，跳过')
+          elif anchor in s:
+              open(p, 'w', encoding='utf-8').write(s.replace(anchor, anchor + add, 1))
+              print('PATCHED OK')
+          else:
+              print('!! 锚点未命中（上游可能已改）—— 不改，让编译失败暴露真相')
+          PY
+          echo "---- 修补后 ----"
+          grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
+
+      - name: 4.8 导出 __cfi_slowpath 空桩（原厂模块带 CFI 引用）
+        working-directory: kernel
+        run: |
+          # 原厂模块按开了 CFI(Clang 控制流完整性) 的内核编译，每个函数带 CFI 检查，
+          # 失败路径引用内核的 __cfi_slowpath。本内核没开 CFI → 符号缺失 →
+          # 原厂模块 insmod 报 Unknown symbol __cfi_slowpath (err -2)。
+          # 导出空桩 = permissive 模式，解析通过且行为无害。
+          cat >> drivers/of/base.c <<'EOF'
+
+          /* OPPO 固件模块以 CFI 构建，引用 __cfi_slowpath；本内核未开 CFI，
+             提供空桩（等价 CFI permissive），仅供其符号解析。 */
+          void __cfi_slowpath(u64 id, void *ptr) { }
+          EXPORT_SYMBOL(__cfi_slowpath);
+          EOF
+          grep -n "__cfi_slowpath" drivers/of/base.c | head -3
+
+      - name: 4.9 解除供应商子目录 Makefile 里的「通用 -Werror」
+        run: |
+          # 为什么 KCFLAGS=-Wno-error 不够：
+          #   各子目录自己写的 ccflags-y/subdir-ccflags-y 会排在 KCFLAGS【之后】，
+          #   例如 drivers/devfreq/helio-dvfsrc-v3/Makefile: ccflags-y += -Werror
+          #   于是新版 clang 对供应商代码报的风格告警（unused-but-set-variable 等）
+          #   又变回致命错误。
+          # 这里只把【非 = 形式】的 -Werror 改成 -Wno-error，
+          # 刻意保留 -Werror=xxx 与 -Werror-implicit-function-declaration（另一个开关管）。
+          CNT=0
+          while IFS= read -r f; do
+            if grep -qE -- '-Werror([[:space:]]|$)' "$f"; then
+              sed -i -E 's/-Werror([[:space:]])/-Wno-error\1/g; s/-Werror$/-Wno-error/g' "$f"
+              CNT=$((CNT+1)); echo "  patched: $f"
+            fi
+          done < <(find kernel vendor -name Makefile -o -name Kbuild -o -name '*.mk' 2>/dev/null)
+          echo "共修改 $CNT 个文件"
+          echo "== 复验：不应再有通用 -Werror =="
+          grep -rnE -- '-Werror([[:space:]]|$)' kernel vendor --include=Makefile --include=Kbuild --include='*.mk' | head -10 || echo "(已清零)"
+
+      - name: 4.7 补 vendor 代码依赖的 Android 树布局
+        run: |
+          set -e
+          KROOT="$(cd kernel && pwd)"
+          echo "内核目录 = $KROOT"
+
+          # vendor 里的充电代码写死了 ../../../../kernel-4.19/drivers/...
+          # （OPPO 在 Android 源码树里把内核检出为 kernel-4.19/，而我们是 kernel/）。
+          # 由于该文件是通过 drivers/power/oplus -> ../../../vendor/oplus/kernel/charger/
+          # 这个符号链接被编到的，clang 记录的目录名是「拼写路径」，具体落在哪一级不好推定，
+          # 所以把几种可能的落点都建上（都是无害的软链，只影响 include 查找）。
+          ln -sfn . "$KROOT/kernel-4.19"
+          mkdir -p "$KROOT/drivers"
+          ln -sfn .. "$KROOT/drivers/kernel-4.19"
+          ln -sfn kernel "$KROOT/../kernel-4.19"
+          mkdir -p "$KROOT/../vendor"
+          ln -sfn ../kernel "$KROOT/../vendor/kernel-4.19"
+
+          echo "== 逐个验证哪种写法能解析到真文件 =="
+          T="drivers/misc/mediatek/typec/tcpc/inc/tcpm.h"
+          for p in "$KROOT/kernel-4.19/$T" \
+                   "$KROOT/drivers/kernel-4.19/$T" \
+                   "$KROOT/../kernel-4.19/$T" \
+                   "$KROOT/../vendor/kernel-4.19/$T"; do
+            if [ -f "$p" ]; then echo "  OK   $p"; else echo "  MISS $p"; fi
+          done
+
+      - name: 4.99 恢复内核编译缓存
+        id: kcache
+        uses: actions/cache/restore@v4
+        with:
+          # 内核侧（源码 + 补丁）自 9-27 起未变动，编译产物可直接复用。
+          # 若将来改了内核补丁，把 kv1 递增即可强制全量重编。
+          path: kernel/out
+          key: kout-kv1
+
+      - name: 5. 配置 + 编译
+        working-directory: kernel
+        run: |
+          set -o pipefail
+          DEF="${{ steps.cfg.outputs.def }}"
+          export ARCH=arm64
+          MK="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
+
+          # ---------- 缓存命中分支：直接复用缓存产物，完全不跑 make ----------
+          # 关键教训（实测 #40）：actions/cache 恢复【不保留文件时间戳】，
+          # 因此 make 看到的状态不一致 → 会重跑归档/链接（14 分钟）且最终在
+          # built-in.a 上失败。而我们要的产物（内核镜像 / Module.symvers /
+          # 生成头文件 / .config）都是有效文件，与 mtime 无关 → 直接跳过编译。
+          if [ "${{ steps.kcache.outputs.cache-hit }}" = "true" ]; then
+            echo "==== 缓存命中：复用缓存产物，跳过 19 分钟全量编译 ===="
+            # 供应商模块需要的 include 路径（与全量路径保持一致）
+            KROOT="$(pwd)"
+            {
+              echo ''
+              echo '# --- injected by CI: 补齐供应商模块依赖的 include 路径 ---'
+              echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/scp/include"
+              echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/typec/tcpc/inc"
+            } >> Makefile
+            echo "== 关键产物自检 =="
+            for f in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz \
+                     out/arch/arm64/boot/Image out/Module.symvers out/.config; do
+              if [ -f "$f" ]; then echo "  OK   $f ($(du -h "$f" | cut -f1))"; else echo "  缺失 $f"; fi
+            done
+            echo "== boot 目录 =="
+            ls -la out/arch/arm64/boot/ 2>/dev/null | head -8
+            echo "== out 体积 =="; du -sh out 2>/dev/null || true
+            exit 0
+          fi
+          echo "==== 缓存未命中：全量编译（约 19 分钟）===="
+          # KCFLAGS 注入的降级开关。注意：顶层 Makefile 里 KCFLAGS 在第 1007 行，
+          # 确实在 -Werror=xxx（982 行等）之后 —— 但【通用 -Wno-error 压不住 specific 的
+          # -Werror=strict-prototypes】，必须写成 -Wno-error=<名字> 才生效。
+          # 供应商代码按老 clang 写的，首个撞上的：
+          #   sched_assist_slide_v1.c:129  void f() {}  -> [-Werror,-Wstrict-prototypes]
+          # 只降级【纯风格】那一条，不动 incompatible-pointer-types 之类可能掩盖真 bug 的。
+          MAKE="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
+          echo "== 生成 .config =="
+          $MAKE "$DEF" 2>&1 | tail -5
+
+          echo "== 关掉 dtbo 覆盖层（cust.dtsi 未公开，编不了）=="          # arch/arm64/boot/dts/mediatek/Makefile:
+          #   dtb-y += mt6833.dtb                      <- boot.img 的基座，不依赖 cust.dtsi
+          #   dtb-y += oplus6833_20015.dtb ... (27 个)  <- dtbo 覆盖层，全都要 <项目号>/cust.dtsi
+          # 而 164 个 dts 里 140 个都 include 了它，那些目录 OPPO 从未公开（来自 Android device 树）。
+          # 我们只替换内核、不动 dtbo 分区，所以直接关掉覆盖层，保留基座。
+          ./scripts/config --file out/.config -d BUILD_ARM64_DTB_OVERLAY_IMAGE
+          $MAKE olddefconfig >/dev/null 2>&1 || true
+          grep -E 'DTB_OVERLAY_IMAGE|APPENDED_DTB_IMAGE' out/.config || true
+
+          echo "== 补 vendor 模块缺的 include 路径 =="
+          # drivers/misc/mediatek/scp/rv/scp_feature_define.h 里是 #include "scp.h"，
+          # 而 scp.h 在 scp/include/ 下；OPPO 自己的 SCP Makefile 会加 -I，
+          # 但走 vendor 侧编译的 oplus_sensor_feedback 没有这个 -I。
+          KROOT="$(pwd)"
+          {
+            echo ''
+            echo '# --- injected by CI: 补齐供应商模块依赖的 include 路径 ---'
+            echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/scp/include"
+            echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/typec/tcpc/inc"
+          } >> Makefile
+          tail -4 Makefile
+
+          echo "== 编译 =="
+          $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -60
+          echo "== 产物 =="
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
+          echo "== out 体积 =="; du -sh out 2>/dev/null || true
+
+      - name: 5.1 保存内核编译缓存
+        if: steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: kernel/out
+          key: kout-kv1
+
+      - name: 6. 打包 boot.img（用自带 mkboot.py，零外部依赖）
+        working-directory: kernel
+        run: |
+          set -e
+          IMAGE=""
+          for c in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+            [ -f "$c" ] && IMAGE="$c" && break
+          done
+          if [ -z "$IMAGE" ]; then echo "没找到内核镜像，跳过打包"; exit 0; fi
+          echo "内核镜像: $IMAGE ($(du -h $IMAGE | cut -f1))"
+          cp "$IMAGE" ../kernel_image
+
+          if [ ! -f ../boot.bin ]; then
+            echo "仓库根目录没有 boot.bin，只输出内核镜像"; exit 0
+          fi
+
+          echo "=========== 原始 boot.bin 结构 ==========="
+          python3 ../mkboot.py --info ../boot.bin
+
+          echo "=========== 替换 kernel 段 ==========="
+          python3 ../mkboot.py ../boot.bin "$IMAGE" "$GITHUB_WORKSPACE/boot_kernelsu.img"
+
+          echo "=========== 生成结果复验 ==========="
+          python3 ../mkboot.py --info "$GITHUB_WORKSPACE/boot_kernelsu.img"
+          ls -la "$GITHUB_WORKSPACE/boot_kernelsu.img" ../boot.bin
+
+      - name: 6.5 收集内核模块（.ko）
+        working-directory: kernel
+        run: |
+          # 这个配置几乎是全内置的：530 个 =y，只有 7 个 .ko
+          # (lcd / kheaders / trace_mmstat / tcp_htcp / tcp_westwood /
+          #  mt6357-accdet / mt6359-accdet)。默认 make 目标已经把它们编出来了。
+          OUT="$GITHUB_WORKSPACE/modules_out"
+          FLAT="$GITHUB_WORKSPACE/modules_flat"
+          rm -rf "$OUT" "$FLAT"; mkdir -p "$OUT" "$FLAT"
+          cnt=0
+          # 坑：find 必须从 kernel/ 这一层找（cwd 就是 kernel/），
+          # 如果用 `(cd out && find . ...)` 拿到的 ./drivers/... 是相对 out/ 的，
+          # 回到 kernel/ 下 cp 就会 "cannot stat"。run#12 就栽在这。
+          while IFS= read -r f; do
+            rel="${f#out/}"
+            mkdir -p "$OUT/$(dirname "$rel")"
+            cp "$f" "$OUT/$rel"
+            cp "$f" "$FLAT/$(basename "$rel")"
+            cnt=$((cnt+1))
+          done < <(find out -name '*.ko' | sort)
+          echo "共收集 $cnt 个 .ko"
+          ls -la "$FLAT"
+          # modules.load：Android 启动时按这个清单 insmod（最后写，避免把自己列进去）
+          ls "$FLAT" | grep -v '^modules.load$' | sort > "$FLAT/modules.load"
+          echo "== modules.load =="
+          cat "$FLAT/modules.load"
+
+      - name: 6.6 下载配套 Manager APK（用 CI 的网络，绕开本机被墙/代理不稳）
+        if: ${{ github.event.inputs.ksu_mode != 'none' }}
+        run: |
+          set -e
+          OUT="$GITHUB_WORKSPACE/manager_apk"
+          mkdir -p "$OUT"
+          case "${{ github.event.inputs.ksu_mode }}" in
+            kernelsu)      REPO="tiann/KernelSU" ;;
+            kernelsu-next) REPO="KernelSU-Next/KernelSU-Next" ;;
+            sukisu)        REPO="SukiSU-Ultra/SukiSU-Ultra" ;;
+          esac
+          echo "== 从 $REPO 取 release 里的 APK =="
+          curl -LSs -H 'Accept: application/vnd.github+json' \
+               -H "Authorization: Bearer ${{ github.token }}" \
+               "https://api.github.com/repos/$REPO/releases/latest" -o /tmp/rel.json
+          python3 -c "import json;d=json.load(open('/tmp/rel.json'));print('release =',d.get('tag_name'));[print(a['url'],a['name']) for a in d['assets'] if a['name'].lower().endswith('.apk')]" > /tmp/apks.txt
+          cat /tmp/apks.txt
+          grep -q '^https' /tmp/apks.txt || { echo "!! 没找到 APK 资产"; exit 0; }
+          while read -r U N; do
+            curl -LSs -H 'Accept: application/octet-stream' \
+                 -H "Authorization: Bearer ${{ github.token }}" "$U" -o "$OUT/$N"
+          done < <(grep '^https' /tmp/apks.txt)
+          ls -la "$OUT"
+
+      - name: 6.7 编译 MTK 连接驱动模块（修复 WiFi/蓝牙）
+        run: |
+          # 根因（2026-09-28 实测）：MTK 的 WiFi/BT 驱动不在内核里，是原厂放在
+          # /vendor/lib/modules/ 的 .ko（wmt_drv/wlan_drv_gen4m/bt_drv_connac1x/...），
+          # 开机由 init.rc insmod 加载。原厂模块按原厂内核编译，我们的内核
+          # CONFIG_MODVERSIONS=y + MODULE_SIG_FORCE=y → 拒载 → 无 /dev/wmtdetect
+          # → wmt_loader 无限重试 → WiFi+蓝牙全挂。
+          # 修法：用【我们的内核】把这套模块重编出来（自动带我们的签名）。
+          set -o pipefail
+          MODDIR="$GITHUB_WORKSPACE/vendor/mediatek/kernel_modules/connectivity"
+          KSRC="$GITHUB_WORKSPACE/kernel"
+          KOUT="$KSRC/out"
+          OUTDIR="$GITHUB_WORKSPACE/conn_modules"
+          mkdir -p "$OUTDIR"
+          # 参数实测来源：手机 getprop + 内核 /proc/config.gz
+          export MTK_PLATFORM=mt6853          # 注意：k6833v1_64 项目的平台串是 mt6853
+          export CONFIG_MTK_PLATFORM=mt6853
+          export MTK_PLATFORM_WMT=mt6853
+          export TARGET_BOARD_PLATFORM=mt6833
+          export TARGET_BOARD_PLATFORM_WMT=mt6833
+          export MTK_CONSYS_ADIE=MT6631       # 首轮猜测值，失败按报错迭代
+          export WLAN_CHIP_ID=6853            # gen4m: CONFIG_MTK_PLATFORM=mt$(WLAN_CHIP_ID)
+          export TARGET_BUILD_VARIANT=user
+          export KERNEL_OUT="$KOUT"
+          MAKEARGS="ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error=strict-prototypes"
+          build_mod() {
+            local NAME="$1"; local M="$2"; local EXTRA="$3"
+            echo "======== $NAME (M=$M) ========"
+            # tee 保留全文；过滤 objdump 噪音；最后独立汇总所有 error 行
+            # （tail 截断会吃掉首个错误，而首个错误才是病根）
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" $EXTRA modules 2>&1 | tee "/tmp/b_$NAME.log" | grep -v "aarch64-linux-gnu-objdump" | tail -25
+            echo "---- $NAME error 汇总（前 40 条）----"
+            grep -E "error:" "/tmp/b_$NAME.log" | head -40 || true
+          }
+          build_mod conninfra        "$MODDIR/conninfra"        || true
+          build_mod connfem          "$MODDIR/connfem"          || true
+          build_mod wmt_drv          "$MODDIR/common"           || true
+          # 后建的模块要用先建模块导出的符号（wmt_drv 导出 mtk_wcn_wmt_func_on /
+          # mtk_wcn_stp_set_bluez 等，run#18 里 bt 就因缺符号而残废）
+          export KBUILD_EXTRA_SYMBOLS="$MODDIR/common/Module.symvers $MODDIR/conninfra/Module.symvers $MODDIR/connfem/Module.symvers"
+          # HIF=AXI 的铁证：原厂 wlan_drv_gen4m.ko 二进制里 "axi" 出现 20 次，sdio/pcie 均为 0
+          export CONFIG_MTK_COMBO_WIFI_HIF=axi
+          export WLAN_CHIP_ID=6853
+          # gen4m 的 gl_qa_agent.h 用到 LIST_SEG_MAX，但公开源码树里没有定义
+          # （大概率是 OPPO 源码公开时漏了个私有头）。该结构只用于 QA 工具（HQA list mode），
+          # 正常联网功能不使用。兜底定义让编译通过；值取保守的 8。
+          QAH="$MODDIR/wlan/core/gen4m/os/linux/include/gl_qa_agent.h"
+          python3 - "$QAH" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'define LIST_SEG_MAX' in s:
+              print('已补过，跳过')
+          else:
+              open(p, 'w', encoding='utf-8').write(
+                  '#ifndef LIST_SEG_MAX\n#define LIST_SEG_MAX 8\n#endif\n' + s)
+              print('PATCHED LIST_SEG_MAX fallback')
+          PY
+          # 同源的第二个缺口：wlan_oid.c 用到 nicCmdEventListmode 回调，公开树里没有。
+          # 签名与 nic_cmd_event.h 里其它 nicCmdEvent* 一致（prAdapter/prCmdInfo/pucEventBuf）。
+          # ListMode 是 QA 工具功能，空实现占位只打日志，不影响正常联网。
+          OIDC="$MODDIR/wlan/core/gen4m/common/wlan_oid.c"
+          python3 - "$OIDC" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'void nicCmdEventListmode(' in s:
+              print('已补过，跳过')
+          else:
+              anchor = 'uint32_t wlanoidListMode(IN struct ADAPTER *prAdapter,'
+              stub = ('/* 公开源码缺失的私有回调（ListMode 为 QA 工具功能），空实现占位 */\n'
+                      'void nicCmdEventListmode(IN struct ADAPTER *prAdapter,\n'
+                      '\t\t\t IN struct CMD_INFO *prCmdInfo, IN uint8_t *pucEventBuf)\n'
+                      '{\n'
+                      '\tDBGLOG(OID, TRACE, "nicCmdEventListmode stub: QA-only feature\\n");\n'
+                      '}\n\n')
+              if anchor not in s:
+                  print('!! 锚点未命中，跳过')
+              else:
+                  open(p, 'w', encoding='utf-8').write(s.replace(anchor, stub + anchor, 1))
+                  print('PATCHED nicCmdEventListmode stub')
+          PY
+          # gen4m 的 EMI/LLS 代码段包在 #if CFG_SUPPORT_LLS 里，用到的
+          # WIFI_EMI_ADDR_MASK / gConEmiPhyBaseFinal 都是 OPPO 私有宏，公开树没有。
+          # LLS = Link Layer Statistics（Pixel 式 WiFi 统计），关掉不影响正常联网
+          # → 把定义处改成 0，整段代码退出编译，两个缺失符号一起消失
+          grep -rl "define CFG_SUPPORT_LLS" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+            sed -i 's/define CFG_SUPPORT_LLS 1/define CFG_SUPPORT_LLS 0/' "$f"
+            echo "LLS disabled in: $f"
+          done
+          # gen4m 源码用 gConEmiPhyBaseFinal / gConEmiSizeFinal（OPPO 私有别名，
+          # 公开树只声明了 gConEmiPhyBase / gConEmiSize，由 conninfra/wmt 导出）
+          # → 统一改用公开符号
+          grep -rlE "gConEmi(PhyBase|Size)Final" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+            sed -i 's/gConEmiPhyBaseFinal/gConEmiPhyBase/g; s/gConEmiSizeFinal/gConEmiSize/g' "$f"
+            echo "patched gConEmi*Final: $f"
+          done
+          # gl_init.c 用 kalSetEmiMpuProtection（私有 glue：给 EMI 加 MPU 保护，
+          # 安全加固非功能必需）—— 公开树没有，插空实现
+          GI="$MODDIR/wlan/core/gen4m/os/linux/gl_init.c"
+          python3 - "$GI" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'static void kalSetEmiMpuProtection' in s:
+              print('已补过，跳过')
+          else:
+              lines = s.split('\n')
+              # 锚点：文件级全局变量（恒编译）。上一版插到文件头 include 块之后，
+              # 但那个位置包在 #if (CFG_SUPPORT_CONNINFRA==1) 里，宏不成立时整段被
+              # 预处理掉 → 符号仍未定义。这里选不受任何 #if 保护的文件作用域位置。
+              anchor = 'int g_u4HaltFlag;'
+              idx = next((k for k, l in enumerate(lines) if anchor in l), None)
+              stub = ('/* 公开树缺失的私有 glue：EMI MPU 保护（安全加固非必需），空实现 */\n'
+                      'static void kalSetEmiMpuProtection(phys_addr_t base, bool en) { }')
+              if idx is None:
+                  print('!! 锚点未命中，跳过')
+              else:
+                  lines.insert(idx + 1, stub)
+                  open(p, 'w', encoding='utf-8').write('\n'.join(lines))
+                  print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
+          PY
+          # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
+          # 【芯片族宏】Makefile 第 46 行把所有 SOC 宏默认 -U（未定义），只有
+          # MTK_COMBO_CHIP 匹配时才 -D。外部模块构建没人设这个变量 → 全空 →
+          # axi.c 的 mtk_axi_ids 表无法闭合（每项靠 #ifdef 块里的 "}," 收尾）→
+          # 报 "expected '}'"。取证：原厂 wlan_drv_gen4m.ko 的字符串里是
+          # mt6632 / connac / soc2_1 → 本机是 connac1x 族（与 bt_drv_connac1x 同族）。
+          # 追加在 Makefile 末尾 → 命令行顺序上晚于开头的 -U，故 -D 生效。
+          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
+            [ -f "$KBF" ] || continue
+            # 守卫必须用【我们自己注入的独有注释】判定：Makefile 第 105 行本来就有
+            # "-DCONNAC" 字样（在 ifneq 条件块里），用 "DCONNAC" 当守卫会误判成已补过
+            if ! grep -q "injected: connac" "$KBF"; then
+              # 芯片族宏：逐个试错后的定论 —— 原厂 gen4m 二进制里 DEFINE 的
+              # driver_data 符号是 mt66xx_driver_data_soc2_1x1（唯一且已定义），
+              # 用 -DCONNAC 会引用无人提供的 mt66xx_driver_data_connac。
+              # ⚠️ 只能开一个：axi.c 的 mtk_axi_ids 表里每个 #ifdef 块都以 "}," 收尾，
+              #    同时开 SOC2_1X1+SOC2_2X2 会导致重复闭合 → 语法错误。
+              printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n# 关闭芯片复位特性：gl_rst.c 的 WMT 复位代码（WMTDRV_TYPE_*/WMTMSG_TYPE_* 等类型）\n# 只在 CFG_SUPPORT_CONNINFRA=1 时才有头文件支撑；我们的 conninfra 因缺 conninfra.cfg\n# 无法初始化（内核 FW_LOADER_USER_HELPER_FALLBACK 导致 EAGAIN 死循环），故走\n# CFG_SUPPORT_CONNINFRA=0 路线。这两个复位特性与正常联网无关，关掉最干净。\n# 追加在末尾 → 命令行上晚于 Makefile 里的 -D...=1，后者被覆盖。\nccflags-y += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\nEXTRA_CFLAGS += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\n' >> "$KBF"
+              echo "SOC2_1X1 flag appended to: $KBF"
+            fi
+            # ⚠️ 头文件里的 #define 压不过命令行 -D（顺序上 #define 在后），
+            # gl_rst.c 的芯片复位代码因此始终被编进来，而它需要 conninfra 的
+            # WMT 类型/API（我们走 CFG_SUPPORT_CONNINFRA=0 没有）。
+            # 与之前 CFG_SUPPORT_LLS 同一手法：直接改 config.h。
+            CFGH="$MODDIR/wlan/core/gen4m/include/config.h"
+            if [ -f "$CFGH" ] && grep -q "^#define CFG_CHIP_RESET_SUPPORT" "$CFGH"; then
+              sed -i 's/^#define CFG_CHIP_RESET_SUPPORT[[:space:]]\+1/#define CFG_CHIP_RESET_SUPPORT          0/' "$CFGH"
+              sed -i 's/^#define CFG_WMT_RESET_API_SUPPORT[[:space:]]\+1/#define CFG_WMT_RESET_API_SUPPORT      0/' "$CFGH"
+              echo "config.h: 复位特性已关闭"
+              grep -n "^#define CFG_CHIP_RESET_SUPPORT\|^#define CFG_WMT_RESET" "$CFGH" | head -3
+            fi
+            # 同宏若定义在别的头里，一并关掉
+            grep -rl "define CFG_WMT_RESET_API_SUPPORT" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+              sed -i 's/define CFG_WMT_RESET_API_SUPPORT 1/define CFG_WMT_RESET_API_SUPPORT 0/; s/define CFG_WMT_RESET_API_SUPPORT$/define CFG_WMT_RESET_API_SUPPORT 0/' "$f" 2>/dev/null
+              echo "  WMT reset api 关闭: $(basename $f)"
+            done
+          done
+          # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
+          # → 文件作用域插空实现（插进函数体会报 "function definition is not allowed here"）
+          AXI="$MODDIR/wlan/core/gen4m/os/linux/hif/axi/axi.c"
+          python3 - "$AXI" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'kalSetDrvEmiMpuProtection(phys_addr_t' in s:
+              print('已补过，跳过')
+          else:
+              anchor = 'static const struct platform_device_id mtk_axi_ids[] = {'
+              i = s.find(anchor)
+              if i < 0:
+                  print('!! axi.c 锚点未命中')
+              else:
+                  stub = ('/* 公开树缺失的私有 glue：驱动 EMI MPU 保护，空实现 */\n'
+                          'static void kalSetDrvEmiMpuProtection(phys_addr_t base, int type, unsigned int size) { }\n\n')
+                  s = s[:i] + stub + s[i:]
+                  open(p, 'w', encoding='utf-8').write(s)
+                  print('PATCHED kalSetDrvEmiMpuProtection in axi.c')
+          PY
+          # 注意：-DGNU_PACKED=__attribute__((packed)) 里的圆括号会让 /bin/sh
+          # 命令行语法炸裂 → 改用无括号的 -include 强制注入补丁头
+          cat > "$MODDIR/wlan/core/gen4m/gnu_packed_fix.h" <<'EOF'
+          #ifndef GEN4M_FIX_H
+          #define GEN4M_FIX_H
+          /* ⚠️ 必须有 include guard：该头同时通过 ccflags-y 和 EXTRA_CFLAGS 的
+             -include 注入 → 编译器会收到两次 -include → 无 guard 时内容被处理两遍
+             → 下面这些定义会报 redefinition（已踩过） */
+          #ifndef GNU_PACKED
+          #define GNU_PACKED __attribute__((packed))
+          #endif
+          /* 私有 wlan_service 模块未发布，gl_qa_agent.c 依赖它的错误码 */
+          #ifndef SERV_STATUS_AGENT_INVALID_LEN
+          #define SERV_STATUS_AGENT_INVALID_LEN (-1001)
+          #endif
+          /* gl_rst.c 里定义的复位计时全局量：其 extern 声明在 gl_rst.h 中被
+             #if CFG_CHIP_RESET_SUPPORT 包着；我们关掉了该特性，而
+             gl_cfg80211.c / chips/soc2_1x1.c 在 guard 外仍在用 → 补本 TU 私有替身 */
+          extern unsigned long long u8ResetTime;
+          extern unsigned char fgSimplifyResetFlow;
+          /* WMT 类型与 API 的真实定义：soc2_1x1.c 的 RF 校准钩子
+             (soc2_1x1wlanCalDebugCmd) 无守卫地调用 mtk_wcn_wmt_do_reset_only 和
+             WMTDRV_TYPE_WIFI。wmt_exp.h 现在已在 include 路径上（WMT_SUPPORT=y），
+             运行时这些符号由 wmt_drv 导出（已核实），所以只要编译期能见到声明即可。 */
+          #include <wmt_exp.h>
+          /* 复位全局量：两者情况不同，必须区别对待 ——
+             · kalIsResetting(): 真定义在 gl_rst.c 的 guard 之外（已确认编译进来）
+               → 只能给 extern 声明（给定义会 redefinition，已踩过两次）
+             · fgIsResetting: 真定义在 guard 之内（被我们关掉的特性）→ 模块里无人定义
+               → MODPOST 会报 undefined → 必须给【弱定义】：能跨 TU 重复，
+                 链接器只留一份，将来若真定义恢复也会自动胜出 */
+          extern unsigned char kalIsResetting(void);
+          __attribute__((weak)) unsigned char fgIsResetting = 0;
+          #endif /* GEN4M_FIX_H */
+          EOF
+          # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
+          # 放公共头会 redefinition）→ 就地插在全局变量声明前
+          GQA="$MODDIR/wlan/core/gen4m/os/linux/gl_qa_agent.c"
+          python3 - "$GQA" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'u4Reserved[64]' in s:
+              print('已补过，跳过')
+          else:
+              anchor = 'struct list_mode_event g_HqaListModeStatus;'
+              i = s.find(anchor)
+              if i < 0:
+                  print('!! 锚点未命中')
+              else:
+                  ls = s.rfind('\n', 0, i) + 1
+                  s = s[:ls] + 'struct list_mode_event { unsigned int u4Reserved[64]; };\n' + s[ls:]
+                  open(p, 'w', encoding='utf-8').write(s)
+                  print('PATCHED list_mode_event in gl_qa_agent.c')
+          PY
+          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
+            [ -f "$KBF" ] || continue
+            if ! grep -q "gnu_packed_fix" "$KBF"; then
+              printf '\nccflags-y += -ferror-limit=1000 -include $(src)/gnu_packed_fix.h\nEXTRA_CFLAGS += -ferror-limit=1000 -include $(src)/gnu_packed_fix.h\n' >> "$KBF"
+              echo "flags appended to: $KBF"
+            fi
+          done
+          # gl_kal.c 顶部守卫保留（双保险，无害）
+          GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
+          if ! grep -q "ifndef GNU_PACKED" "$GLK"; then
+            sed -i '1i #ifndef GNU_PACKED\n#define GNU_PACKED __attribute__((packed))\n#endif' "$GLK"
+            echo "GNU_PACKED guard added to gl_kal.c"
+          fi
+          # 现场取证：GNU_PACKED 在整个 connectivity 树里有没有定义
+          GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
+          echo "---- GNU_PACKED 定义搜索（全 connectivity 树）----"
+          grep -rn "define GNU_PACKED" "$MODDIR" 2>/dev/null | head -5 || true
+          echo "---- gl_kal.c 总行数: $(wc -l < "$GLK") ----"
+          # 芯片族：正确途径是 Makefile 变量 MTK_COMBO_CHIP —— gen4m 的 Makefile
+          # 用 $(filter SOC2_1X1,$(MTK_COMBO_CHIP)) 决定【编译哪些源文件】；
+          # 只用 ccflags 传 -DSOC2_1X1 只影响预处理，定义 driver_data 的源文件
+          # 不会被编进来（实测：gen4m 里 mt66xx_driver_data_soc2_1x1 变成 UND）。
+          # 原厂 gen4m 二进制里该符号是 DEFINED，故此行是必须的。
+          # 注意：不要再手工 -DSOC2_1X1（Makefile 会自己加），否则 axi.c 的
+          # mtk_axi_ids 表会重复闭合。
+          # WMT_SUPPORT=y 是必需变量：gen4m Makefile 第 349 行
+          #   ifeq ($(WMT_SUPPORT),y) → 才会 -I .../common/common_main/include
+          #   （plat_priv.c 的 #include "wmt_exp.h" 靠它）
+          # chrdev 必须先建：它导出 gen4m 需要的 10 个符号（wifi_fwlog_* / wifi_ics_* 等），
+          # 且把它的 Module.symvers 加入 KBUILD_EXTRA_SYMBOLS 才能让 gen4m 记录正确的
+          # 符号 CRC（否则 MODPOST 报 undefined 且 CRC 缺失 → 运行时 "disagrees about
+          # version of symbol" 装载失败）
+          build_mod wmt_chrdev_wifi "$MODDIR/wlan/adaptor" "MODULE_NAME=wmt_chrdev_wifi" || true
+          export KBUILD_EXTRA_SYMBOLS="$MODDIR/common/Module.symvers $MODDIR/conninfra/Module.symvers $MODDIR/connfem/Module.symvers $MODDIR/wlan/adaptor/Module.symvers"
+          echo "gen4m 的 KBUILD_EXTRA_SYMBOLS: $KBUILD_EXTRA_SYMBOLS"
+          # MTK_ANDROID_WMT=y 是最后一块拼图：Makefile 316-325 行据此决定
+          # -DCFG_MTK_ANDROID_WMT=1/0。原厂 gen4m 里有 mtk_wcn_wmt_wlan_reg/unreg
+          # （WiFi 驱动向 WMT 注册自己的 probe），而我们的候选宏 MTK_COMBO_CHIP=SOC2_1X1
+          # 不含 MT6632 → 落到 else 分支 → CFG_MTK_ANDROID_WMT=0 → 注册代码不编译
+          # → WMT 的 wlan_probe 恒为 NULL → "WMT turn on WIFI fail"（实测日志）
+          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1 WMT_SUPPORT=y MTK_ANDROID_WMT=y" || true
+          # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
+          export BT_PLATFORM=connac1x
+          build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
+          # emi_fix：公开树缺 conninfra 的 mt6833 平台代码 → 芯片 EMI MPU 配置缺失
+          # → WiFi 固件下载被 MPU 拒（emimpu_violation_irq）。内核已导出
+          # emi_mpu_set_protection()，用这个小模块补上（参数化，一次编译多种试法）
+          build_mod emi_fix          "$GITHUB_WORKSPACE/emi_fix"  || true
+          echo "======== 收集 .ko ========"
+          # wlan/adaptor 产出的模块没有名字（.ko），且 upload-artifact 默认排除隐藏文件
+          # → 先改名再收集，否则 wmt_chrdev_wifi.ko 会静默丢失
+          if [ -f "$MODDIR/wlan/adaptor/.ko" ]; then
+            mv "$MODDIR/wlan/adaptor/.ko" "$MODDIR/wlan/adaptor/wmt_chrdev_wifi.ko"
+            echo "renamed adaptor/.ko -> wmt_chrdev_wifi.ko"
+          fi
+          find "$MODDIR" -name '*.ko' -exec cp -v {} "$OUTDIR/" \; 2>/dev/null | head
+          # emi_fix 在 $GITHUB_WORKSPACE/emi_fix（不在 vendor 树里），单独收
+          cp -v "$GITHUB_WORKSPACE/emi_fix/emi_fix.ko" "$OUTDIR/" 2>/dev/null || echo "emi_fix.ko 未生成"
+          ls -la "$OUTDIR"
+
+      - name: 7. 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a55-kernel-v2
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            kernel/out/arch/arm64/boot/*
+            kernel/build.log
+            boot_kernelsu.img
+            kernel/kernel_image
+            modules_out/**
+            modules_flat/**
+            manager_apk/**
+            conn_modules/**
+            kernel/out/Module.symvers
+
+      - name: 8. 失败时输出日志尾部
+        if: failure()
+        working-directory: kernel
+        run: |
+          echo "=========== 真正的错误行（-j 并行会把 error 埋在几万行里）==========="
+          grep -n -E "error:|Error [0-9]|No rule to make|can't open file|undefined reference" build.log 2>/dev/null | grep -v objdump | head -40 || echo "(grep 无命中)"
+          echo
+          echo "=========== build.log 最后 80 行 ==========="
+          tail -80 build.log 2>/dev/null || echo "(没有 build.log)"
