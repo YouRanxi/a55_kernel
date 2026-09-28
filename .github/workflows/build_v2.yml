@@ -634,6 +634,11 @@ jobs:
           #ifndef SERV_STATUS_AGENT_INVALID_LEN
           #define SERV_STATUS_AGENT_INVALID_LEN (-1001)
           #endif
+          /* gl_rst.c 里定义的复位计时全局量：其 extern 声明在 gl_rst.h 中被
+             #if CFG_CHIP_RESET_SUPPORT 包着；我们关掉了该特性，而
+             gl_cfg80211.c 等文件在 guard 外仍在用 → 这里补声明 */
+          extern unsigned long long u8ResetTime;
+          extern unsigned char fgSimplifyResetFlow;
           EOF
           # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
           # 放公共头会 redefinition）→ 就地插在全局变量声明前
