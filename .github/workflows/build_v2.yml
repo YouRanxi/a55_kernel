@@ -636,9 +636,18 @@ jobs:
           #endif
           /* gl_rst.c 里定义的复位计时全局量：其 extern 声明在 gl_rst.h 中被
              #if CFG_CHIP_RESET_SUPPORT 包着；我们关掉了该特性，而
-             gl_cfg80211.c 等文件在 guard 外仍在用 → 这里补声明 */
+             gl_cfg80211.c / chips/soc2_1x1.c 在 guard 外仍在用 → 补本 TU 私有替身 */
           extern unsigned long long u8ResetTime;
           extern unsigned char fgSimplifyResetFlow;
+          /* WMT 类型与 API 的真实定义：soc2_1x1.c 的 RF 校准钩子
+             (soc2_1x1wlanCalDebugCmd) 无守卫地调用 mtk_wcn_wmt_do_reset_only 和
+             WMTDRV_TYPE_WIFI。wmt_exp.h 现在已在 include 路径上（WMT_SUPPORT=y），
+             运行时这些符号由 wmt_drv 导出（已核实），所以只要编译期能见到声明即可。 */
+          #include <wmt_exp.h>
+          /* gl_rst.c 的复位全局量因关闭 CFG_CHIP_RESET_SUPPORT 未编译进来 →
+             给每个 TU 一份私有替身（复位特性已关，值恒为 0，语义无害） */
+          static unsigned char fgIsResetting = 0;
+          static inline unsigned char kalIsResetting(void) { return 0; }
           EOF
           # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
           # 放公共头会 redefinition）→ 就地插在全局变量声明前
