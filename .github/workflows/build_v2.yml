@@ -529,6 +529,13 @@ jobs:
           #ifndef GNU_PACKED
           #define GNU_PACKED __attribute__((packed))
           #endif
+          /* 私有 wlan_service 模块未发布，gl_qa_agent.c 依赖它的两个符号：
+             SERV_STATUS_AGENT_INVALID_LEN（错误码，桩值即可）
+             struct list_mode_event（仅在 gqa.c:86 声明全局变量，无字段访问）*/
+          #ifndef SERV_STATUS_AGENT_INVALID_LEN
+          #define SERV_STATUS_AGENT_INVALID_LEN (-1001)
+          #endif
+          struct list_mode_event { unsigned int u4Reserved[64]; };
           EOF
           for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
             [ -f "$KBF" ] || continue
