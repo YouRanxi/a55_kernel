@@ -491,8 +491,33 @@ jobs:
             sed -i 's/gConEmiPhyBaseFinal/gConEmiPhyBase/g' "$f"
             echo "patched gConEmiPhyBaseFinal: $f"
           done
-          build_mod wmt_chrdev_wifi  "$MODDIR/wlan/adaptor"     || true
-          build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
+          # gl_init.c 用 kalSetEmiMpuProtection（私有 glue：给 EMI 加 MPU 保护，
+          # 安全加固非功能必需）—— 公开树没有，插空实现
+          GI="$MODDIR/wlan/core/gen4m/os/linux/gl_init.c"
+          python3 - "$GI" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'static void kalSetEmiMpuProtection' in s:
+              print('已补过，跳过')
+          else:
+              i = s.find('kalSetEmiMpuProtection')
+              ls = s.rfind('\n', 0, i) + 1
+              stub = ('/* 公开树缺失的私有 glue：EMI MPU 保护（安全加固非必需），空实现 */\n'
+                      'static void kalSetEmiMpuProtection(phys_addr_t base, bool en) { }\n')
+              s = s[:ls] + stub + s[ls:]
+              open(p, 'w', encoding='utf-8').write(s)
+              print('PATCHED kalSetEmiMpuProtection stub')
+          PY
+          # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
+          # -ferror-limit=0：clang 一次报出所有缺失符号（写进模块 Makefile，避免 shell 引号问题）
+          GM="$MODDIR/wlan/core/gen4m/Makefile"
+          if ! grep -q "ferror-limit" "$GM"; then
+            sed -i '1i ccflags-y += -ferror-limit=0' "$GM"
+            echo "gen4m Makefile: added -ferror-limit=0"
+          fi
+          build_mod wlan_gen4m          "$MODDIR/wlan/core/gen4m"  || true
+          build_mod wmt_chrdev_wifi     "$MODDIR/wlan/adaptor"     || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
