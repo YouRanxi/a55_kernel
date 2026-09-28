@@ -586,9 +586,22 @@ jobs:
               printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n# 关闭芯片复位特性：gl_rst.c 的 WMT 复位代码（WMTDRV_TYPE_*/WMTMSG_TYPE_* 等类型）\n# 只在 CFG_SUPPORT_CONNINFRA=1 时才有头文件支撑；我们的 conninfra 因缺 conninfra.cfg\n# 无法初始化（内核 FW_LOADER_USER_HELPER_FALLBACK 导致 EAGAIN 死循环），故走\n# CFG_SUPPORT_CONNINFRA=0 路线。这两个复位特性与正常联网无关，关掉最干净。\n# 追加在末尾 → 命令行上晚于 Makefile 里的 -D...=1，后者被覆盖。\nccflags-y += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\nEXTRA_CFLAGS += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\n' >> "$KBF"
               echo "SOC2_1X1 flag appended to: $KBF"
             fi
-            # 注意：不要去手工补 -I common_main/include —— Makefile 第 349 行
-            # 用 ifeq ($(WMT_SUPPORT),y) 控制这些路径，缺的是【变量】不是路径。
-            # 正确做法见下方 build_mod 传参：WMT_SUPPORT=y
+            # ⚠️ 头文件里的 #define 压不过命令行 -D（顺序上 #define 在后），
+            # gl_rst.c 的芯片复位代码因此始终被编进来，而它需要 conninfra 的
+            # WMT 类型/API（我们走 CFG_SUPPORT_CONNINFRA=0 没有）。
+            # 与之前 CFG_SUPPORT_LLS 同一手法：直接改 config.h。
+            CFGH="$MODDIR/wlan/core/gen4m/include/config.h"
+            if [ -f "$CFGH" ] && grep -q "^#define CFG_CHIP_RESET_SUPPORT" "$CFGH"; then
+              sed -i 's/^#define CFG_CHIP_RESET_SUPPORT[[:space:]]\+1/#define CFG_CHIP_RESET_SUPPORT          0/' "$CFGH"
+              sed -i 's/^#define CFG_WMT_RESET_API_SUPPORT[[:space:]]\+1/#define CFG_WMT_RESET_API_SUPPORT      0/' "$CFGH"
+              echo "config.h: 复位特性已关闭"
+              grep -n "^#define CFG_CHIP_RESET_SUPPORT\|^#define CFG_WMT_RESET" "$CFGH" | head -3
+            fi
+            # 同宏若定义在别的头里，一并关掉
+            grep -rl "define CFG_WMT_RESET_API_SUPPORT" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+              sed -i 's/define CFG_WMT_RESET_API_SUPPORT 1/define CFG_WMT_RESET_API_SUPPORT 0/; s/define CFG_WMT_RESET_API_SUPPORT$/define CFG_WMT_RESET_API_SUPPORT 0/' "$f" 2>/dev/null
+              echo "  WMT reset api 关闭: $(basename $f)"
+            done
           done
           # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
           # → 文件作用域插空实现（插进函数体会报 "function definition is not allowed here"）
