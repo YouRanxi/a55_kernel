@@ -583,7 +583,7 @@ jobs:
               # 用 -DCONNAC 会引用无人提供的 mt66xx_driver_data_connac。
               # ⚠️ 只能开一个：axi.c 的 mtk_axi_ids 表里每个 #ifdef 块都以 "}," 收尾，
               #    同时开 SOC2_1X1+SOC2_2X2 会导致重复闭合 → 语法错误。
-              printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n' >> "$KBF"
+              printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n# 关闭芯片复位特性：gl_rst.c 的 WMT 复位代码（WMTDRV_TYPE_*/WMTMSG_TYPE_* 等类型）\n# 只在 CFG_SUPPORT_CONNINFRA=1 时才有头文件支撑；我们的 conninfra 因缺 conninfra.cfg\n# 无法初始化（内核 FW_LOADER_USER_HELPER_FALLBACK 导致 EAGAIN 死循环），故走\n# CFG_SUPPORT_CONNINFRA=0 路线。这两个复位特性与正常联网无关，关掉最干净。\n# 追加在末尾 → 命令行上晚于 Makefile 里的 -D...=1，后者被覆盖。\nccflags-y += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\nEXTRA_CFLAGS += -DCFG_CHIP_RESET_SUPPORT=0 -DCFG_WMT_RESET_API_SUPPORT=0\n' >> "$KBF"
               echo "SOC2_1X1 flag appended to: $KBF"
             fi
             # 注意：不要去手工补 -I common_main/include —— Makefile 第 349 行
