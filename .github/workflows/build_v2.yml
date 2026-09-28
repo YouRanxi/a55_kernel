@@ -714,7 +714,12 @@ jobs:
           build_mod wmt_chrdev_wifi "$MODDIR/wlan/adaptor" "MODULE_NAME=wmt_chrdev_wifi" || true
           export KBUILD_EXTRA_SYMBOLS="$MODDIR/common/Module.symvers $MODDIR/conninfra/Module.symvers $MODDIR/connfem/Module.symvers $MODDIR/wlan/adaptor/Module.symvers"
           echo "gen4m 的 KBUILD_EXTRA_SYMBOLS: $KBUILD_EXTRA_SYMBOLS"
-          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1 WMT_SUPPORT=y" || true
+          # MTK_ANDROID_WMT=y 是最后一块拼图：Makefile 316-325 行据此决定
+          # -DCFG_MTK_ANDROID_WMT=1/0。原厂 gen4m 里有 mtk_wcn_wmt_wlan_reg/unreg
+          # （WiFi 驱动向 WMT 注册自己的 probe），而我们的候选宏 MTK_COMBO_CHIP=SOC2_1X1
+          # 不含 MT6632 → 落到 else 分支 → CFG_MTK_ANDROID_WMT=0 → 注册代码不编译
+          # → WMT 的 wlan_probe 恒为 NULL → "WMT turn on WIFI fail"（实测日志）
+          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1 WMT_SUPPORT=y MTK_ANDROID_WMT=y" || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
