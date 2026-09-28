@@ -522,22 +522,27 @@ jobs:
                   print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
-          # GNU_PACKED 宏在公开树缺失（私有头未发布）→ 三重保险：
-          # ① gl_kal.c 顶部加 #ifndef 守卫（最直接）
+          # GNU_PACKED 宏在公开树缺失（私有头未发布）
+          # 注意：-DGNU_PACKED=__attribute__((packed)) 里的圆括号会让 /bin/sh
+          # 命令行语法炸裂 → 改用无括号的 -include 强制注入补丁头
+          cat > "$MODDIR/wlan/core/gen4m/gnu_packed_fix.h" <<'EOF'
+          #ifndef GNU_PACKED
+          #define GNU_PACKED __attribute__((packed))
+          #endif
+          EOF
+          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
+            [ -f "$KBF" ] || continue
+            if ! grep -q "gnu_packed_fix" "$KBF"; then
+              printf '\nccflags-y += -ferror-limit=1000 -include $(src)/gnu_packed_fix.h\nEXTRA_CFLAGS += -ferror-limit=1000 -include $(src)/gnu_packed_fix.h\n' >> "$KBF"
+              echo "flags appended to: $KBF"
+            fi
+          done
+          # gl_kal.c 顶部守卫保留（双保险，无害）
           GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
           if ! grep -q "ifndef GNU_PACKED" "$GLK"; then
             sed -i '1i #ifndef GNU_PACKED\n#define GNU_PACKED __attribute__((packed))\n#endif' "$GLK"
             echo "GNU_PACKED guard added to gl_kal.c"
           fi
-          # ②③ ccflags-y / EXTRA_CFLAGS 追加到 Kbuild+Makefile 末尾
-          #    （插在第 1 行会被文件后方可能的 := 赋值覆盖）
-          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
-            [ -f "$KBF" ] || continue
-            if ! grep -q "ferror-limit" "$KBF"; then
-              printf '\nccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))\nEXTRA_CFLAGS += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))\n' >> "$KBF"
-              echo "flags appended to: $KBF"
-            fi
-          done
           # 现场取证：GNU_PACKED 在整个 connectivity 树里有没有定义
           GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
           echo "---- GNU_PACKED 定义搜索（全 connectivity 树）----"
