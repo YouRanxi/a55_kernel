@@ -649,12 +649,13 @@ jobs:
              WMTDRV_TYPE_WIFI。wmt_exp.h 现在已在 include 路径上（WMT_SUPPORT=y），
              运行时这些符号由 wmt_drv 导出（已核实），所以只要编译期能见到声明即可。 */
           #include <wmt_exp.h>
-          /* gl_rst.c 的复位全局量因关闭 CFG_CHIP_RESET_SUPPORT 未编译进来 →
-             给一份【弱符号】定义：允许多处出现，链接器只留一个；若真定义
-             （gl_rst.c 里那份）存在则自动胜出。不能用 static，否则与
-             gl_rst.h 的真实声明冲突（redefinition，已踩过）。 */
-          __attribute__((weak)) unsigned char fgIsResetting = 0;
-          __attribute__((weak)) unsigned char kalIsResetting(void) { return 0; }
+          /* 复位全局量：真定义在 gl_rst.c 里（已确认被编译进来），
+             但它的声明在 gl_rst.h 中被 #if CFG_CHIP_RESET_SUPPORT 包着 →
+             其它 TU（gl_cfg80211.c / chips/soc2_1x1.c）看不到 → 这里补【声明】。
+             ⚠️ 只能是 extern，不能给定义：gl_rst.c 自己的定义会和定义冲突
+             （weak 也救不了同 TU 内的重定义，已踩过两次）。 */
+          extern unsigned char fgIsResetting;
+          extern unsigned char kalIsResetting(void);
           #endif /* GEN4M_FIX_H */
           EOF
           # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
