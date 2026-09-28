@@ -657,7 +657,14 @@ jobs:
           echo "---- GNU_PACKED 定义搜索（全 connectivity 树）----"
           grep -rn "define GNU_PACKED" "$MODDIR" 2>/dev/null | head -5 || true
           echo "---- gl_kal.c 总行数: $(wc -l < "$GLK") ----"
-          build_mod wlan_gen4m          "$MODDIR/wlan/core/gen4m"  || true
+          # 芯片族：正确途径是 Makefile 变量 MTK_COMBO_CHIP —— gen4m 的 Makefile
+          # 用 $(filter SOC2_1X1,$(MTK_COMBO_CHIP)) 决定【编译哪些源文件】；
+          # 只用 ccflags 传 -DSOC2_1X1 只影响预处理，定义 driver_data 的源文件
+          # 不会被编进来（实测：gen4m 里 mt66xx_driver_data_soc2_1x1 变成 UND）。
+          # 原厂 gen4m 二进制里该符号是 DEFINED，故此行是必须的。
+          # 注意：不要再手工 -DSOC2_1X1（Makefile 会自己加），否则 axi.c 的
+          # mtk_axi_ids 表会重复闭合。
+          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1" || true
           # chrdev：Makefile 用 $(MODULE_NAME)，不传就是空 → 产出无名 .ko →
           # 内核从文件名取模块名得到空串 → mod_sysfs_setup 失败（insmod 报 Invalid argument）
           build_mod wmt_chrdev_wifi "$MODDIR/wlan/adaptor" "MODULE_NAME=wmt_chrdev_wifi" || true
