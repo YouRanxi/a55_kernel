@@ -427,7 +427,8 @@ jobs:
           build_mod() {
             local NAME="$1"; local M="$2"
             echo "======== $NAME (M=$M) ========"
-            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tail -60
+            # 过滤 objdump 调试信息噪音，保留真正的编译诊断；80 行覆盖首个错误
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | grep -v "aarch64-linux-gnu-objdump" | tail -80
           }
           build_mod conninfra        "$MODDIR/conninfra"        || true
           build_mod connfem          "$MODDIR/connfem"          || true
