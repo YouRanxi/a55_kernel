@@ -627,6 +627,11 @@ jobs:
           # 注意：-DGNU_PACKED=__attribute__((packed)) 里的圆括号会让 /bin/sh
           # 命令行语法炸裂 → 改用无括号的 -include 强制注入补丁头
           cat > "$MODDIR/wlan/core/gen4m/gnu_packed_fix.h" <<'EOF'
+          #ifndef GEN4M_FIX_H
+          #define GEN4M_FIX_H
+          /* ⚠️ 必须有 include guard：该头同时通过 ccflags-y 和 EXTRA_CFLAGS 的
+             -include 注入 → 编译器会收到两次 -include → 无 guard 时内容被处理两遍
+             → 下面这些定义会报 redefinition（已踩过） */
           #ifndef GNU_PACKED
           #define GNU_PACKED __attribute__((packed))
           #endif
@@ -650,6 +655,7 @@ jobs:
              gl_rst.h 的真实声明冲突（redefinition，已踩过）。 */
           __attribute__((weak)) unsigned char fgIsResetting = 0;
           __attribute__((weak)) unsigned char kalIsResetting(void) { return 0; }
+          #endif /* GEN4M_FIX_H */
           EOF
           # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
           # 放公共头会 redefinition）→ 就地插在全局变量声明前
