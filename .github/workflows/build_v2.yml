@@ -286,7 +286,7 @@ jobs:
           # 内核侧（源码 + 补丁）自 9-27 起未变动，编译产物可直接复用。
           # 若将来改了内核补丁，把 kv1 递增即可强制全量重编。
           path: kernel/out
-          key: kout-kv1
+          key: kout-kv2
 
       - name: 5. 配置 + 编译
         working-directory: kernel
@@ -338,8 +338,16 @@ jobs:
           # 而 164 个 dts 里 140 个都 include 了它，那些目录 OPPO 从未公开（来自 Android device 树）。
           # 我们只替换内核、不动 dtbo 分区，所以直接关掉覆盖层，保留基座。
           ./scripts/config --file out/.config -d BUILD_ARM64_DTB_OVERLAY_IMAGE
+          # 【关键】两个与 WiFi 固件加载直接相关的内核配置：
+          # ① FW_LOADER_USER_HELPER_FALLBACK=y 会让 request_firmware 返回 -EAGAIN 死循环
+          #    （conninfra 因缺 conninfra.cfg 而卡死的元凶；原厂是关闭的）
+          # ② MTK_EMI_MPU 没开 → emi_mpu_set_protection 没导出 → 芯片的 EMI 访问权限
+          #    无人配置 → WiFi 固件下载被 MPU 拒（emimpu_violation_irq）
+          ./scripts/config --file out/.config -d FW_LOADER_USER_HELPER_FALLBACK
+          ./scripts/config --file out/.config -e MTK_EMI_MPU
           $MAKE olddefconfig >/dev/null 2>&1 || true
           grep -E 'DTB_OVERLAY_IMAGE|APPENDED_DTB_IMAGE' out/.config || true
+          grep -E 'FW_LOADER_USER_HELPER_FALLBACK|MTK_EMI_MPU' out/.config || true
 
           echo "== 补 vendor 模块缺的 include 路径 =="
           # drivers/misc/mediatek/scp/rv/scp_feature_define.h 里是 #include "scp.h"，
@@ -365,7 +373,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: kernel/out
-          key: kout-kv1
+          key: kout-kv2
 
       - name: 6. 打包 boot.img（用自带 mkboot.py，零外部依赖）
         working-directory: kernel
