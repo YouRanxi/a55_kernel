@@ -645,9 +645,11 @@ jobs:
              运行时这些符号由 wmt_drv 导出（已核实），所以只要编译期能见到声明即可。 */
           #include <wmt_exp.h>
           /* gl_rst.c 的复位全局量因关闭 CFG_CHIP_RESET_SUPPORT 未编译进来 →
-             给每个 TU 一份私有替身（复位特性已关，值恒为 0，语义无害） */
-          static unsigned char fgIsResetting = 0;
-          static inline unsigned char kalIsResetting(void) { return 0; }
+             给一份【弱符号】定义：允许多处出现，链接器只留一个；若真定义
+             （gl_rst.c 里那份）存在则自动胜出。不能用 static，否则与
+             gl_rst.h 的真实声明冲突（redefinition，已踩过）。 */
+          __attribute__((weak)) unsigned char fgIsResetting = 0;
+          __attribute__((weak)) unsigned char kalIsResetting(void) { return 0; }
           EOF
           # struct list_mode_event 只在 gl_qa_agent.c 缺（plat_priv.c 自带定义，
           # 放公共头会 redefinition）→ 就地插在全局变量声明前
