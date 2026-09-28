@@ -291,10 +291,10 @@ jobs:
           
       - name: 4.995 补齐 emi_mpu/mt6853 与 emi_fix 源码
         run: |
-          # 公开树缺 emi_mpu/mt6853（CONFIG_MTK_EMI_MPU=y 必需）；
+          # 公开树缺 emi_mpu/mt6853（CONFIG_MTK_EMI_MPU=y 必需）
           # 代码取自 OPPO u_14 分支 mt6739 模板，全用内核导出接口，平台无关
           mkdir -p kernel/drivers/misc/mediatek/emi_mpu/mt6853
-            cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/Makefile" <<'EOF'
+          cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/Makefile" <<'EOF'
             #
             # Copyright (C) 2015 MediaTek Inc.
             #
@@ -310,8 +310,8 @@ jobs:
 
             ccflags-y += -I$(srctree)/drivers/misc/mediatek/emi_bwl/$(MTK_PLATFORM)/
             obj-y += emi_mpu.o
-            EOF
-            cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_mpu.h" <<'EOF'
+          EOF
+          cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_mpu.h" <<'EOF'
             /* SPDX-License-Identifier: GPL-2.0 */
             /*
              * Copyright (c) 2019 MediaTek Inc.
@@ -423,8 +423,8 @@ jobs:
             extern void mt_emi_reg_write(unsigned int data, unsigned int offset);
 
             #endif  /* !__MT_EMI_MPU_H */
-            EOF
-            cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_module.h" <<'EOF'
+          EOF
+          cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_module.h" <<'EOF'
             /* SPDX-License-Identifier: GPL-2.0 */
             /*
              * Copyright (c) 2019 MediaTek Inc.
@@ -974,8 +974,8 @@ jobs:
             };
 
             #endif /* end of _EMI_MODULE_H_ */
-            EOF
-            cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_mpu.c" <<'EOF'
+          EOF
+          cat > "kernel/drivers/misc/mediatek/emi_mpu/mt6853/emi_mpu.c" <<'EOF'
             /* SPDX-License-Identifier: GPL-2.0 */
             /*
              * Copyright (c) 2019 MediaTek Inc.
@@ -1560,13 +1560,14 @@ jobs:
 
             module_init(emi_mpu_mod_init);
             module_exit(emi_mpu_mod_exit);
-            EOF
-          echo "emi_mpu/mt6853 文件数: $(ls kernel/drivers/misc/mediatek/emi_mpu/mt6853/ | wc -l)"
+          EOF
+          echo "mt6853 文件数: $(ls kernel/drivers/misc/mediatek/emi_mpu/mt6853/ | wc -l)"
+          ls -la kernel/drivers/misc/mediatek/emi_mpu/mt6853/
           mkdir -p "$GITHUB_WORKSPACE/emi_fix"
-            cat > "$GITHUB_WORKSPACE/emi_fix/Makefile" <<'EOF'
+          cat > "$GITHUB_WORKSPACE/emi_fix/Makefile" <<'EOF'
             obj-m += emi_fix.o
-            EOF
-            cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
+          EOF
+          cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
             // SPDX-License-Identifier: GPL-2.0
             /*
              * emi_fix - 为 WiFi(CONSYS) 子系统配置 EMI MPU 访问权限
@@ -1680,8 +1681,9 @@ jobs:
             module_exit(emi_fix_exit);
             MODULE_LICENSE("GPL");
             MODULE_DESCRIPTION("Configure EMI MPU access for WiFi/CONSYS");
-            EOF
-          echo "emi_fix 源码已落盘"
+          EOF
+          echo "== emi_fix 源码已落盘 =="
+          head -3 kernel/drivers/misc/mediatek/emi_mpu/mt6853/Makefile
 
       - name: 5. 配置 + 编译
         working-directory: kernel
