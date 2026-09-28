@@ -323,6 +323,8 @@ jobs:
           #define AP_REGION_ID		31
           #define EMI_MPUD0_ST		(CEN_EMI_BASE + 0x160)
           #define EMI_MPUD_ST(domain)	(EMI_MPUD0_ST + (4*domain))
+          #define EMI_MPUD0_ST2		(CEN_EMI_BASE + 0x200)
+          #define EMI_MPUD_ST2(domain)	(EMI_MPUD0_ST2 + (4*domain))
           #define EMI_MPUS		(CEN_EMI_BASE + 0x01F0)
           #define EMI_MPUT		(CEN_EMI_BASE + 0x01F8)
           #define EMI_MPUT_2ND		(CEN_EMI_BASE + 0x01FC)
