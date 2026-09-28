@@ -296,17 +296,28 @@ jobs:
           export ARCH=arm64
           MK="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
 
-          # ---------- 缓存命中分支：跳过约 19 分钟的全量编译 ----------
-          # 关键点：fresh clone 出来的源码 mtime 全是"现在"，会把缓存的 .o 全部
-          # 判为过期 → 必须把源码时间戳回落到过去，make 才真正变空操作。
-          # 同时【不能】重跑 defconfig：会重写 .config 进而触发全量重建。
+          # ---------- 缓存命中分支：直接复用缓存产物，完全不跑 make ----------
+          # 关键教训（实测 #40）：actions/cache 恢复【不保留文件时间戳】，
+          # 因此 make 看到的状态不一致 → 会重跑归档/链接（14 分钟）且最终在
+          # built-in.a 上失败。而我们要的产物（内核镜像 / Module.symvers /
+          # 生成头文件 / .config）都是有效文件，与 mtime 无关 → 直接跳过编译。
           if [ "${{ steps.kcache.outputs.cache-hit }}" = "true" ]; then
-            echo "==== 缓存命中：内核侧未变动，跳过全量编译 ===="
-            find . -path ./out -prune -o -type f -print0 2>/dev/null | xargs -0 -r touch -d '2020-01-01' 2>/dev/null || true
-            echo "== 空操作编译（顺带验证缓存完整性）=="
-            $MK -j"$(nproc)" 2>&1 | tee build.log | tail -12
-            echo "== 产物 =="
-            ls -la out/arch/arm64/boot/ 2>/dev/null | head -6
+            echo "==== 缓存命中：复用缓存产物，跳过 19 分钟全量编译 ===="
+            # 供应商模块需要的 include 路径（与全量路径保持一致）
+            KROOT="$(pwd)"
+            {
+              echo ''
+              echo '# --- injected by CI: 补齐供应商模块依赖的 include 路径 ---'
+              echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/scp/include"
+              echo "KBUILD_CFLAGS += -I$KROOT/drivers/misc/mediatek/typec/tcpc/inc"
+            } >> Makefile
+            echo "== 关键产物自检 =="
+            for f in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz \
+                     out/arch/arm64/boot/Image out/Module.symvers out/.config; do
+              if [ -f "$f" ]; then echo "  OK   $f ($(du -h "$f" | cut -f1))"; else echo "  缺失 $f"; fi
+            done
+            echo "== boot 目录 =="
+            ls -la out/arch/arm64/boot/ 2>/dev/null | head -8
             echo "== out 体积 =="; du -sh out 2>/dev/null || true
             exit 0
           fi
