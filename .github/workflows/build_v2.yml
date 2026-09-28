@@ -707,10 +707,14 @@ jobs:
           # WMT_SUPPORT=y 是必需变量：gen4m Makefile 第 349 行
           #   ifeq ($(WMT_SUPPORT),y) → 才会 -I .../common/common_main/include
           #   （plat_priv.c 的 #include "wmt_exp.h" 靠它）
-          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1 WMT_SUPPORT=y" || true
-          # chrdev：Makefile 用 $(MODULE_NAME)，不传就是空 → 产出无名 .ko →
-          # 内核从文件名取模块名得到空串 → mod_sysfs_setup 失败（insmod 报 Invalid argument）
+          # chrdev 必须先建：它导出 gen4m 需要的 10 个符号（wifi_fwlog_* / wifi_ics_* 等），
+          # 且把它的 Module.symvers 加入 KBUILD_EXTRA_SYMBOLS 才能让 gen4m 记录正确的
+          # 符号 CRC（否则 MODPOST 报 undefined 且 CRC 缺失 → 运行时 "disagrees about
+          # version of symbol" 装载失败）
           build_mod wmt_chrdev_wifi "$MODDIR/wlan/adaptor" "MODULE_NAME=wmt_chrdev_wifi" || true
+          export KBUILD_EXTRA_SYMBOLS="$MODDIR/common/Module.symvers $MODDIR/conninfra/Module.symvers $MODDIR/connfem/Module.symvers $MODDIR/wlan/adaptor/Module.symvers"
+          echo "gen4m 的 KBUILD_EXTRA_SYMBOLS: $KBUILD_EXTRA_SYMBOLS"
+          build_mod wlan_gen4m "$MODDIR/wlan/core/gen4m" "MTK_COMBO_CHIP=SOC2_1X1 WMT_SUPPORT=y" || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
