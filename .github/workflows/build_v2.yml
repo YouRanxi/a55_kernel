@@ -586,6 +586,12 @@ jobs:
               printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n' >> "$KBF"
               echo "SOC2_1X1 flag appended to: $KBF"
             fi
+            # plat_priv.c 需要 wmt_exp.h（在 connectivity/common/common_main/include），
+            # 而 gen4m 的 Makefile 没有无条件加这个 -I → 补齐（buildroot 实测缺它）
+            if ! grep -q "common_main/include" "$KBF"; then
+              printf 'ccflags-y += -I$(src)/../../../common/common_main/include\nccflags-y += -I$(src)/../../../common/core/include\nccflags-y += -I$(src)/../../../common/include\n' >> "$KBF"
+              echo "connectivity common include paths appended to: $KBF"
+            fi
           done
           # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
           # → 文件作用域插空实现（插进函数体会报 "function definition is not allowed here"）
