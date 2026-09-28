@@ -1783,6 +1783,18 @@ jobs:
           EOF
           echo "== emi_fix 源码已落盘 =="
           head -3 kernel/drivers/misc/mediatek/emi_mpu/mt6853/Makefile
+          # emi_reg_rw.c 需要 mach/emi_mpu.h（公开树未随内核发布），提供寄存器范围常量
+          mkdir -p kernel/include/mach
+          cat > kernel/include/mach/emi_mpu.h <<'EOF'
+          /* SPDX-License-Identifier: GPL-2.0 */
+          /* 最小 stub：emi_reg_rw.c 仅用 EMI_MPU_START/END 校验 MPU 寄存器块偏移。
+             MPU 寄存器块：CTRL=0x0，SA0=0x100，32 区域 APC 表远小于 0x1000。 */
+          #ifndef _MACH_EMI_MPU_STUB_H
+          #define _MACH_EMI_MPU_STUB_H
+          #define EMI_MPU_START           0x0000
+          #define EMI_MPU_END             0x0FFF
+          #endif
+          EOF
 
       - name: 5. 配置 + 编译
         working-directory: kernel
