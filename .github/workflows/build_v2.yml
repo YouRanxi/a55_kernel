@@ -477,12 +477,24 @@ jobs:
                   open(p, 'w', encoding='utf-8').write(s.replace(anchor, stub + anchor, 1))
                   print('PATCHED nicCmdEventListmode stub')
           PY
+          # gen4m 源码用 gConEmiPhyBaseFinal（OPPO 私有符号，公开树没定义），
+          # 但 conninfra/wmt 导出了 gConEmiPhyBase（EMI 物理基址本体）→ 改用后者
+          grep -rl "gConEmiPhyBaseFinal" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+            sed -i 's/gConEmiPhyBaseFinal/gConEmiPhyBase/g' "$f"
+            echo "patched gConEmiPhyBaseFinal: $f"
+          done
           build_mod wmt_chrdev_wifi  "$MODDIR/wlan/adaptor"     || true
           build_mod wlan_gen4m       "$MODDIR/wlan/core/gen4m"  || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
           echo "======== 收集 .ko ========"
+          # wlan/adaptor 产出的模块没有名字（.ko），且 upload-artifact 默认排除隐藏文件
+          # → 先改名再收集，否则 wmt_chrdev_wifi.ko 会静默丢失
+          if [ -f "$MODDIR/wlan/adaptor/.ko" ]; then
+            mv "$MODDIR/wlan/adaptor/.ko" "$MODDIR/wlan/adaptor/wmt_chrdev_wifi.ko"
+            echo "renamed adaptor/.ko -> wmt_chrdev_wifi.ko"
+          fi
           find "$MODDIR" -name '*.ko' -exec cp -v {} "$OUTDIR/" \; 2>/dev/null | head
           ls -la "$OUTDIR"
 
