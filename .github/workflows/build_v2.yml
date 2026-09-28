@@ -501,13 +501,21 @@ jobs:
           if 'static void kalSetEmiMpuProtection' in s:
               print('已补过，跳过')
           else:
-              i = s.find('kalSetEmiMpuProtection')
-              ls = s.rfind('\n', 0, i) + 1
+              lines = s.split('\n')
+              # 插到文件头 include 块之后（文件作用域；插进函数体会报
+              # "function definition is not allowed here"）
+              last_inc = -1
+              for idx in range(min(300, len(lines))):
+                  if lines[idx].lstrip().startswith('#include'):
+                      last_inc = idx
               stub = ('/* 公开树缺失的私有 glue：EMI MPU 保护（安全加固非必需），空实现 */\n'
-                      'static void kalSetEmiMpuProtection(phys_addr_t base, bool en) { }\n')
-              s = s[:ls] + stub + s[ls:]
-              open(p, 'w', encoding='utf-8').write(s)
-              print('PATCHED kalSetEmiMpuProtection stub')
+                      'static void kalSetEmiMpuProtection(phys_addr_t base, bool en) { }')
+              if last_inc < 0:
+                  print('!! 没找到 include 块，跳过')
+              else:
+                  lines.insert(last_inc + 1, stub)
+                  open(p, 'w', encoding='utf-8').write('\n'.join(lines))
+                  print('PATCHED kalSetEmiMpuProtection stub (file scope, after line %d)' % (last_inc + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
           # -ferror-limit=0：clang 一次报出所有缺失符号（写进模块 Makefile，避免 shell 引号问题）
