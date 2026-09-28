@@ -519,21 +519,18 @@ jobs:
                   print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
-          # -ferror-limit：clang 一次报出所有缺失符号（写进模块 Makefile，避免 shell 引号问题）
+          # -ferror-limit + 补私有头里丢失的 GNU_PACKED 宏（公开树没有定义，
+          # 导致所有 struct GNU_PACKED 声明语法失败、类型保持不完整）
           GM="$MODDIR/wlan/core/gen4m/Makefile"
           if ! grep -q "ferror-limit" "$GM"; then
-            sed -i '1i ccflags-y += -ferror-limit=1000' "$GM"
-            echo "gen4m Makefile: added -ferror-limit=1000"
+            sed -i '1i ccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))' "$GM"
+            echo "gen4m Makefile: added -ferror-limit=1000 -DGNU_PACKED=..."
           fi
-          # 现场取证：TPUT_SUB_FACTOR_T 为何在 10207 处"不完整"
+          # 现场取证：GNU_PACKED 在整个 connectivity 树里有没有定义
           GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
+          echo "---- GNU_PACKED 定义搜索（全 connectivity 树）----"
+          grep -rn "define GNU_PACKED" "$MODDIR" 2>/dev/null | head -5 || true
           echo "---- gl_kal.c 总行数: $(wc -l < "$GLK") ----"
-          echo "---- 142-162 行（定义现场）----"
-          sed -n '142,162p' "$GLK"
-          echo "---- TPUT_SUB_FACTOR_T 全部出现处 ----"
-          grep -n "TPUT_SUB_FACTOR_T" "$GLK" | head -6
-          echo "---- GNU_PACKED 宏定义 ----"
-          grep -rn "define GNU_PACKED" "$MODDIR/wlan/core/gen4m/include" 2>/dev/null | head -3
           build_mod wlan_gen4m          "$MODDIR/wlan/core/gen4m"  || true
           build_mod wmt_chrdev_wifi     "$MODDIR/wlan/adaptor"     || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
