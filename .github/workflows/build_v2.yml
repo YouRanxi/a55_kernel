@@ -556,7 +556,40 @@ jobs:
                   print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
-          # GNU_PACKED 宏在公开树缺失（私有头未发布）
+          # 【芯片族宏】Makefile 第 46 行把所有 SOC 宏默认 -U（未定义），只有
+          # MTK_COMBO_CHIP 匹配时才 -D。外部模块构建没人设这个变量 → 全空 →
+          # axi.c 的 mtk_axi_ids 表无法闭合（每项靠 #ifdef 块里的 "}," 收尾）→
+          # 报 "expected '}'"。取证：原厂 wlan_drv_gen4m.ko 的字符串里是
+          # mt6632 / connac / soc2_1 → 本机是 connac1x 族（与 bt_drv_connac1x 同族）。
+          # 追加在 Makefile 末尾 → 命令行顺序上晚于开头的 -U，故 -D 生效。
+          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
+            [ -f "$KBF" ] || continue
+            if ! grep -q "DCONNAC" "$KBF"; then
+              printf '\n# --- injected: 芯片族（connac1x / MT6631）---\nccflags-y += -DCONNAC\nEXTRA_CFLAGS += -DCONNAC\n' >> "$KBF"
+              echo "CONNAC flag appended to: $KBF"
+            fi
+          done
+          # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
+          # → 文件作用域插空实现（插进函数体会报 "function definition is not allowed here"）
+          AXI="$MODDIR/wlan/core/gen4m/os/linux/hif/axi/axi.c"
+          python3 - "$AXI" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          if 'kalSetDrvEmiMpuProtection(phys_addr_t' in s:
+              print('已补过，跳过')
+          else:
+              anchor = 'static const struct platform_device_id mtk_axi_ids[] = {'
+              i = s.find(anchor)
+              if i < 0:
+                  print('!! axi.c 锚点未命中')
+              else:
+                  stub = ('/* 公开树缺失的私有 glue：驱动 EMI MPU 保护，空实现 */\n'
+                          'static void kalSetDrvEmiMpuProtection(phys_addr_t base, int type, unsigned int size) { }\n\n')
+                  s = s[:i] + stub + s[i:]
+                  open(p, 'w', encoding='utf-8').write(s)
+                  print('PATCHED kalSetDrvEmiMpuProtection in axi.c')
+          PY
           # 注意：-DGNU_PACKED=__attribute__((packed)) 里的圆括号会让 /bin/sh
           # 命令行语法炸裂 → 改用无括号的 -include 强制注入补丁头
           cat > "$MODDIR/wlan/core/gen4m/gnu_packed_fix.h" <<'EOF'
