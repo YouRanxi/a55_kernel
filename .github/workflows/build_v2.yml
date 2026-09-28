@@ -578,12 +578,13 @@ jobs:
             # 守卫必须用【我们自己注入的独有注释】判定：Makefile 第 105 行本来就有
             # "-DCONNAC" 字样（在 ifneq 条件块里），用 "DCONNAC" 当守卫会误判成已补过
             if ! grep -q "injected: connac" "$KBF"; then
-              # 芯片族宏：实测原厂 gen4m 里【没有】CONNAC 的 driver_data 符号引用，
-              # 而固件名是 WIFI_RAM_CODE_soc2_2_1_1.bin、原厂字符串有 soc2_1/soc2_2
-              # → 正确族是 SOC2_1X1 / SOC2_2X2（之前用 -DCONNAC 引出了无人提供的
-              #   mt66xx_driver_data_connac 符号）
-              printf '\n# --- injected: soc2 chip family (MT6631 / connac1x) ---\nccflags-y += -DSOC2_1X1 -DSOC2_2X2\nEXTRA_CFLAGS += -DSOC2_1X1 -DSOC2_2X2\n' >> "$KBF"
-              echo "SOC2_1X1/SOC2_2X2 flag appended to: $KBF"
+              # 芯片族宏：逐个试错后的定论 —— 原厂 gen4m 二进制里 DEFINE 的
+              # driver_data 符号是 mt66xx_driver_data_soc2_1x1（唯一且已定义），
+              # 用 -DCONNAC 会引用无人提供的 mt66xx_driver_data_connac。
+              # ⚠️ 只能开一个：axi.c 的 mtk_axi_ids 表里每个 #ifdef 块都以 "}," 收尾，
+              #    同时开 SOC2_1X1+SOC2_2X2 会导致重复闭合 → 语法错误。
+              printf '\n# --- injected: soc2_1x1 chip family (原厂实证) ---\nccflags-y += -DSOC2_1X1\nEXTRA_CFLAGS += -DSOC2_1X1\n' >> "$KBF"
+              echo "SOC2_1X1 flag appended to: $KBF"
             fi
           done
           # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
