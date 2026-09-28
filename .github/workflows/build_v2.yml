@@ -723,6 +723,10 @@ jobs:
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
+          # emi_fix：公开树缺 conninfra 的 mt6833 平台代码 → 芯片 EMI MPU 配置缺失
+          # → WiFi 固件下载被 MPU 拒（emimpu_violation_irq）。内核已导出
+          # emi_mpu_set_protection()，用这个小模块补上（参数化，一次编译多种试法）
+          build_mod emi_fix          "$GITHUB_WORKSPACE/emi_fix"  || true
           echo "======== 收集 .ko ========"
           # wlan/adaptor 产出的模块没有名字（.ko），且 upload-artifact 默认排除隐藏文件
           # → 先改名再收集，否则 wmt_chrdev_wifi.ko 会静默丢失
