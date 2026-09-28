@@ -522,13 +522,20 @@ jobs:
                   print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
-          # -ferror-limit + 补私有头里丢失的 GNU_PACKED 宏
-          # 注意：kbuild 对外部模块优先读 Kbuild 而非 Makefile → 两个都插
+          # GNU_PACKED 宏在公开树缺失（私有头未发布）→ 三重保险：
+          # ① gl_kal.c 顶部加 #ifndef 守卫（最直接）
+          GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
+          if ! grep -q "ifndef GNU_PACKED" "$GLK"; then
+            sed -i '1i #ifndef GNU_PACKED\n#define GNU_PACKED __attribute__((packed))\n#endif' "$GLK"
+            echo "GNU_PACKED guard added to gl_kal.c"
+          fi
+          # ②③ ccflags-y / EXTRA_CFLAGS 追加到 Kbuild+Makefile 末尾
+          #    （插在第 1 行会被文件后方可能的 := 赋值覆盖）
           for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
             [ -f "$KBF" ] || continue
             if ! grep -q "ferror-limit" "$KBF"; then
-              sed -i '1i ccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))' "$KBF"
-              echo "flags added to: $KBF"
+              printf '\nccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))\nEXTRA_CFLAGS += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))\n' >> "$KBF"
+              echo "flags appended to: $KBF"
             fi
           done
           # 现场取证：GNU_PACKED 在整个 connectivity 树里有没有定义
