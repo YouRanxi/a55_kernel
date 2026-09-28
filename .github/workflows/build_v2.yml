@@ -735,6 +735,8 @@ jobs:
             echo "renamed adaptor/.ko -> wmt_chrdev_wifi.ko"
           fi
           find "$MODDIR" -name '*.ko' -exec cp -v {} "$OUTDIR/" \; 2>/dev/null | head
+          # emi_fix 在 $GITHUB_WORKSPACE/emi_fix（不在 vendor 树里），单独收
+          cp -v "$GITHUB_WORKSPACE/emi_fix/emi_fix.ko" "$OUTDIR/" 2>/dev/null || echo "emi_fix.ko 未生成"
           ls -la "$OUTDIR"
 
       - name: 7. 上传产物
