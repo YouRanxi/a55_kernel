@@ -427,8 +427,11 @@ jobs:
           build_mod() {
             local NAME="$1"; local M="$2"
             echo "======== $NAME (M=$M) ========"
-            # 过滤 objdump 调试信息噪音，保留真正的编译诊断；80 行覆盖首个错误
-            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | grep -v "aarch64-linux-gnu-objdump" | tail -80
+            # tee 保留全文；过滤 objdump 噪音；最后独立汇总所有 error 行
+            # （tail 截断会吃掉首个错误，而首个错误才是病根）
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tee "/tmp/b_$NAME.log" | grep -v "aarch64-linux-gnu-objdump" | tail -25
+            echo "---- $NAME error 汇总（前 40 条）----"
+            grep -E "error:" "/tmp/b_$NAME.log" | head -40 || true
           }
           build_mod conninfra        "$MODDIR/conninfra"        || true
           build_mod connfem          "$MODDIR/connfem"          || true
@@ -519,13 +522,15 @@ jobs:
                   print('PATCHED kalSetEmiMpuProtection stub (file scope, after anchor line %d)' % (idx + 1))
           PY
           # -ferror-limit=0：一次报出所有剩余缺失符号（不再挤牙膏）
-          # -ferror-limit + 补私有头里丢失的 GNU_PACKED 宏（公开树没有定义，
-          # 导致所有 struct GNU_PACKED 声明语法失败、类型保持不完整）
-          GM="$MODDIR/wlan/core/gen4m/Makefile"
-          if ! grep -q "ferror-limit" "$GM"; then
-            sed -i '1i ccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))' "$GM"
-            echo "gen4m Makefile: added -ferror-limit=1000 -DGNU_PACKED=..."
-          fi
+          # -ferror-limit + 补私有头里丢失的 GNU_PACKED 宏
+          # 注意：kbuild 对外部模块优先读 Kbuild 而非 Makefile → 两个都插
+          for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
+            [ -f "$KBF" ] || continue
+            if ! grep -q "ferror-limit" "$KBF"; then
+              sed -i '1i ccflags-y += -ferror-limit=1000 -DGNU_PACKED=__attribute__((packed))' "$KBF"
+              echo "flags added to: $KBF"
+            fi
+          done
           # 现场取证：GNU_PACKED 在整个 connectivity 树里有没有定义
           GLK="$MODDIR/wlan/core/gen4m/os/linux/gl_kal.c"
           echo "---- GNU_PACKED 定义搜索（全 connectivity 树）----"
