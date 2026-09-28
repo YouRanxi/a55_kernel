@@ -575,8 +575,10 @@ jobs:
           # 追加在 Makefile 末尾 → 命令行顺序上晚于开头的 -U，故 -D 生效。
           for KBF in "$MODDIR/wlan/core/gen4m/Kbuild" "$MODDIR/wlan/core/gen4m/Makefile"; do
             [ -f "$KBF" ] || continue
-            if ! grep -q "DCONNAC" "$KBF"; then
-              printf '\n# --- injected: 芯片族（connac1x / MT6631）---\nccflags-y += -DCONNAC\nEXTRA_CFLAGS += -DCONNAC\n' >> "$KBF"
+            # 守卫必须用【我们自己注入的独有注释】判定：Makefile 第 105 行本来就有
+            # "-DCONNAC" 字样（在 ifneq 条件块里），用 "DCONNAC" 当守卫会误判成已补过
+            if ! grep -q "injected: connac" "$KBF"; then
+              printf '\n# --- injected: connac chip family (MT6631 / connac1x) ---\nccflags-y += -DCONNAC\nEXTRA_CFLAGS += -DCONNAC\n' >> "$KBF"
               echo "CONNAC flag appended to: $KBF"
             fi
           done
