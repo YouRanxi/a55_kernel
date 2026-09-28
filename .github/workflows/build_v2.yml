@@ -470,11 +470,11 @@ jobs:
           export KERNEL_OUT="$KOUT"
           MAKEARGS="ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error=strict-prototypes"
           build_mod() {
-            local NAME="$1"; local M="$2"
+            local NAME="$1"; local M="$2"; local EXTRA="$3"
             echo "======== $NAME (M=$M) ========"
             # tee 保留全文；过滤 objdump 噪音；最后独立汇总所有 error 行
             # （tail 截断会吃掉首个错误，而首个错误才是病根）
-            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" modules 2>&1 | tee "/tmp/b_$NAME.log" | grep -v "aarch64-linux-gnu-objdump" | tail -25
+            make -C "$KSRC" O="$KOUT" $MAKEARGS M="$M" $EXTRA modules 2>&1 | tee "/tmp/b_$NAME.log" | grep -v "aarch64-linux-gnu-objdump" | tail -25
             echo "---- $NAME error 汇总（前 40 条）----"
             grep -E "error:" "/tmp/b_$NAME.log" | head -40 || true
           }
@@ -578,8 +578,12 @@ jobs:
             # 守卫必须用【我们自己注入的独有注释】判定：Makefile 第 105 行本来就有
             # "-DCONNAC" 字样（在 ifneq 条件块里），用 "DCONNAC" 当守卫会误判成已补过
             if ! grep -q "injected: connac" "$KBF"; then
-              printf '\n# --- injected: connac chip family (MT6631 / connac1x) ---\nccflags-y += -DCONNAC\nEXTRA_CFLAGS += -DCONNAC\n' >> "$KBF"
-              echo "CONNAC flag appended to: $KBF"
+              # 芯片族宏：实测原厂 gen4m 里【没有】CONNAC 的 driver_data 符号引用，
+              # 而固件名是 WIFI_RAM_CODE_soc2_2_1_1.bin、原厂字符串有 soc2_1/soc2_2
+              # → 正确族是 SOC2_1X1 / SOC2_2X2（之前用 -DCONNAC 引出了无人提供的
+              #   mt66xx_driver_data_connac 符号）
+              printf '\n# --- injected: soc2 chip family (MT6631 / connac1x) ---\nccflags-y += -DSOC2_1X1 -DSOC2_2X2\nEXTRA_CFLAGS += -DSOC2_1X1 -DSOC2_2X2\n' >> "$KBF"
+              echo "SOC2_1X1/SOC2_2X2 flag appended to: $KBF"
             fi
           done
           # axi.c 用 kalSetDrvEmiMpuProtection（私有 glue，同 kalSetEmiMpuProtection 的兄弟）
@@ -653,7 +657,9 @@ jobs:
           grep -rn "define GNU_PACKED" "$MODDIR" 2>/dev/null | head -5 || true
           echo "---- gl_kal.c 总行数: $(wc -l < "$GLK") ----"
           build_mod wlan_gen4m          "$MODDIR/wlan/core/gen4m"  || true
-          build_mod wmt_chrdev_wifi     "$MODDIR/wlan/adaptor"     || true
+          # chrdev：Makefile 用 $(MODULE_NAME)，不传就是空 → 产出无名 .ko →
+          # 内核从文件名取模块名得到空串 → mod_sysfs_setup 失败（insmod 报 Invalid argument）
+          build_mod wmt_chrdev_wifi "$MODDIR/wlan/adaptor" "MODULE_NAME=wmt_chrdev_wifi" || true
           # bt 模块名 = bt_drv_$(BT_PLATFORM).ko；原厂文件名 bt_drv_connac1x.ko → BT_PLATFORM=connac1x
           export BT_PLATFORM=connac1x
           build_mod bt_connac1x      "$MODDIR/bt/mt66xx/wmt"    || true
