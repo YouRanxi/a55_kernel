@@ -216,7 +216,23 @@ jobs:
           echo "---- 修补后 ----"
           grep -n "ksu_init_rc_hook\|KSU_KPROBES_HOOK" "$F" | head -12
 
-      - name: 4.6 解除供应商子目录 Makefile 里的「通用 -Werror」
+      - name: 4.8 导出 __cfi_slowpath 空桩（原厂模块带 CFI 引用）
+        working-directory: kernel
+        run: |
+          # 原厂模块按开了 CFI(Clang 控制流完整性) 的内核编译，每个函数带 CFI 检查，
+          # 失败路径引用内核的 __cfi_slowpath。本内核没开 CFI → 符号缺失 →
+          # 原厂模块 insmod 报 Unknown symbol __cfi_slowpath (err -2)。
+          # 导出空桩 = permissive 模式，解析通过且行为无害。
+          cat >> drivers/of/base.c <<'EOF'
+
+          /* OPPO 固件模块以 CFI 构建，引用 __cfi_slowpath；本内核未开 CFI，
+             提供空桩（等价 CFI permissive），仅供其符号解析。 */
+          void __cfi_slowpath(u64 id, void *ptr) { }
+          EXPORT_SYMBOL(__cfi_slowpath);
+          EOF
+          grep -n "__cfi_slowpath" drivers/of/base.c | head -3
+
+      - name: 4.9 解除供应商子目录 Makefile 里的「通用 -Werror」
         run: |
           # 为什么 KCFLAGS=-Wno-error 不够：
           #   各子目录自己写的 ccflags-y/subdir-ccflags-y 会排在 KCFLAGS【之后】，
@@ -486,6 +502,7 @@ jobs:
             modules_flat/**
             manager_apk/**
             conn_modules/**
+            kernel/out/Module.symvers
 
       - name: 8. 失败时输出日志尾部
         if: failure()
