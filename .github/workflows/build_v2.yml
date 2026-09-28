@@ -279,12 +279,38 @@ jobs:
             if [ -f "$p" ]; then echo "  OK   $p"; else echo "  MISS $p"; fi
           done
 
+      - name: 4.99 恢复内核编译缓存
+        id: kcache
+        uses: actions/cache/restore@v4
+        with:
+          # 内核侧（源码 + 补丁）自 9-27 起未变动，编译产物可直接复用。
+          # 若将来改了内核补丁，把 kv1 递增即可强制全量重编。
+          path: kernel/out
+          key: kout-kv1
+
       - name: 5. 配置 + 编译
         working-directory: kernel
         run: |
           set -o pipefail
           DEF="${{ steps.cfg.outputs.def }}"
           export ARCH=arm64
+          MK="make ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-Wno-error=strict-prototypes"
+
+          # ---------- 缓存命中分支：跳过约 19 分钟的全量编译 ----------
+          # 关键点：fresh clone 出来的源码 mtime 全是"现在"，会把缓存的 .o 全部
+          # 判为过期 → 必须把源码时间戳回落到过去，make 才真正变空操作。
+          # 同时【不能】重跑 defconfig：会重写 .config 进而触发全量重建。
+          if [ "${{ steps.kcache.outputs.cache-hit }}" = "true" ]; then
+            echo "==== 缓存命中：内核侧未变动，跳过全量编译 ===="
+            find . -path ./out -prune -o -type f -print0 2>/dev/null | xargs -0 -r touch -d '2020-01-01' 2>/dev/null || true
+            echo "== 空操作编译（顺带验证缓存完整性）=="
+            $MK -j"$(nproc)" 2>&1 | tee build.log | tail -12
+            echo "== 产物 =="
+            ls -la out/arch/arm64/boot/ 2>/dev/null | head -6
+            echo "== out 体积 =="; du -sh out 2>/dev/null || true
+            exit 0
+          fi
+          echo "==== 缓存未命中：全量编译（约 19 分钟）===="
           # KCFLAGS 注入的降级开关。注意：顶层 Makefile 里 KCFLAGS 在第 1007 行，
           # 确实在 -Werror=xxx（982 行等）之后 —— 但【通用 -Wno-error 压不住 specific 的
           # -Werror=strict-prototypes】，必须写成 -Wno-error=<名字> 才生效。
@@ -321,6 +347,14 @@ jobs:
           $MAKE -j"$(nproc)" 2>&1 | tee build.log | tail -60
           echo "== 产物 =="
           ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(boot 目录为空)"
+          echo "== out 体积 =="; du -sh out 2>/dev/null || true
+
+      - name: 5.1 保存内核编译缓存
+        if: steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: kernel/out
+          key: kout-kv1
 
       - name: 6. 打包 boot.img（用自带 mkboot.py，零外部依赖）
         working-directory: kernel
