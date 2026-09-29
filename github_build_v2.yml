@@ -295,7 +295,7 @@ jobs:
           # 内核侧（源码 + 补丁）自 9-27 起未变动，编译产物可直接复用。
           # 若将来改了内核补丁，把 kv1 递增即可强制全量重编。
           path: kernel/out
-          key: kout-kv2
+          key: kout-kv3
 
           
       - name: 4.995 补齐 emi_mpu/mt6853 emi_bwl mach头 emi_fix
@@ -1883,7 +1883,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: kernel/out
-          key: kout-kv2
+          key: kout-kv3
 
       - name: 6. 打包 boot.img（用自带 mkboot.py，零外部依赖）
         working-directory: kernel
