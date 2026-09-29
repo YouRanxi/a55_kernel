@@ -1730,99 +1730,52 @@ jobs:
           cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * emi_fix v9 - 严格复刻原厂 emimpu.c 的调用约定
-           *
-           * 原厂实现（drivers/memory/mediatek/emimpu.c，就在我们内核里）：
-           *   读: smc(MTK_SIP_EMIMPU_CONTROL, MTK_EMIMPU_READ, reg_type, region, dgroup, ...) -> a0
-           *   写: start_enc = (start_rel >> 16) | (region << 24)
-           *       按 dgroup 分两批: end_enc = (end_rel >> 16) | (i << 24)
-           *                         group_apc = sum(apc[i*8+j] & 7) << (3*j)
-           *       smc(MTK_SIP_EMIMPU_CONTROL, MTK_EMIMPU_SET, start_enc, end_enc, group_apc, ...)
-           *   地址均为相对 dram_start(0x40000000) 的值
+           * emi_fix v10 - 直接调用内核 emimpu 驱动导出的 API
+           * 复刻驱动 probe 对 AP 区域的操作序列，目标是 WiFi 的 6MB 池
            */
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
-          #include <linux/arm-smccc.h>
 
-          #define SIP_EMI        0xC200050BUL    /* MTK_SIP_SMC_CMD(0x50B) SMC64 */
-          #define CMD_SET        0
-          #define CMD_READ    2
-          #define READ_SA        0
-          #define READ_EA        1
-          #define READ_APC    2
-          #define DRAM_START    0x40000000ULL
-          #define ADDR_ALIGN    16
+          struct emimpu_region_t;
+          int mtk_emimpu_init_region(struct emimpu_region_t *, unsigned int);
+          int mtk_emimpu_set_addr(struct emimpu_region_t *, unsigned long long, unsigned long long);
+          int mtk_emimpu_set_apc(struct emimpu_region_t *, unsigned int, unsigned int);
+          int mtk_emimpu_lock_region(struct emimpu_region_t *, bool);
+          int mtk_emimpu_set_protection(struct emimpu_region_t *);
 
-          static u32 emimpu_read(u32 type, u32 region, u32 dgroup)
-          {
-              struct arm_smccc_res res;
+          #define MTK_EMIMPU_NO_PROTECTION 0
 
-              arm_smccc_smc(SIP_EMI, CMD_READ, type, region, dgroup, 0, 0, 0, &res);
-              return (u32)res.a0;
-          }
-
-          static void emimpu_set(u32 start_enc, u32 end_enc, u32 apc)
-          {
-              struct arm_smccc_res res;
-
-              arm_smccc_smc(SIP_EMI, CMD_SET, start_enc, end_enc, apc, 0, 0, 0, &res);
-              pr_info("[emi_fix] SET s=0x%08x e=0x%08x apc=0x%08x => a0=0x%lx\n",
-                  start_enc, end_enc, apc, res.a0);
-          }
-
-          static int region = 15;
-          module_param(region, int, 0644);
-          static ulong fw_start = 0x7e000000ULL;
-          module_param(fw_start, ulong, 0644);
-          static ulong fw_size = 0x600000ULL;
-          module_param(fw_size, ulong, 0644);
-          static int do_read;
-          module_param(do_read, int, 0644);
+          static struct {
+              unsigned long long start, end;
+              unsigned int rg_num;
+              unsigned int lock;
+              unsigned int apc[16];
+              void *apc_ptr;
+          } rg;
 
           static int __init emi_fix_init(void)
           {
-              ulong start_rel = fw_start - DRAM_START;
-              ulong end_rel = fw_start + fw_size - 1 - DRAM_START;
-              u32 start_enc, end_enc;
-              int r;
+              int i, ret;
 
-              pr_info("[emi_fix] v9: 原厂 emimpu.c 调用约定复刻\n");
+              pr_info("[emi_fix] v10: 直接调用内核 mtk_emimpu_* API\n");
 
-              /* 1) dump 全部 32 区域的真实配置 */
-              for (r = 0; r < 32; r++) {
-                  u32 sa = emimpu_read(READ_SA, r, 0);
-                  u32 ea = emimpu_read(READ_EA, r, 0);
-                  if (sa != 0xffffffff || ea != 0xffffffff)
-                      pr_info("[emi_fix] R%02d: SA=0x%x EA=0x%x => 0x%08llx-0x%08llx\n",
-                          r, sa, ea,
-                          ((u64)sa << ADDR_ALIGN) + DRAM_START,
-                          (((u64)ea << ADDR_ALIGN) + DRAM_START) | 0xffff);
+              ret = mtk_emimpu_init_region((struct emimpu_region_t *)&rg, 15);
+              pr_info("[emi_fix] init_region rc=%d\n", ret);
+
+              ret = mtk_emimpu_set_addr((struct emimpu_region_t *)&rg,
+                  0x7e000000ULL, 0x7e5fffffULL);
+              pr_info("[emi_fix] set_addr rc=%d\n", ret);
+
+              for (i = 0; i < 16; i++) {
+                  ret = mtk_emimpu_set_apc((struct emimpu_region_t *)&rg, i,
+                      MTK_EMIMPU_NO_PROTECTION);
+                  pr_info("[emi_fix] set_apc[%d] rc=%d\n", i, ret);
               }
 
-              start_enc = (u32)((start_rel >> ADDR_ALIGN) | (region << 24));
-              end_enc = (u32)((end_rel >> ADDR_ALIGN));
-              pr_info("[emi_fix] 目标 R%d: start_enc=0x%08x end_base=0x%08x\n",
-                  region, start_enc, end_enc);
-
-              /* 2) 写入前读回 R15 */
-              pr_info("[emi_fix] 写前: SA=0x%08x EA=0x%08x APC0=0x%08x APC1=0x%08x\n",
-                  emimpu_read(READ_SA, region, 0), emimpu_read(READ_EA, region, 0),
-                  emimpu_read(READ_APC, region, 0), emimpu_read(READ_APC, region, 1));
-
-              if (do_read)
-                  return 0;
-
-              /* 3) 按原厂约定写入：dgroup 1 → 0，每批 8 域，3bit 编码，全 0 = NO_PROTECTION，不加锁 */
-              emimpu_set(start_enc, end_enc | (1 << 24), 0x00000000);
-              emimpu_set(start_enc, end_enc | (0 << 24), 0x00000000);
-
-              /* 4) 读回验证 */
-              pr_info("[emi_fix] 写后: SA=0x%08x EA=0x%08x APC0=0x%08x APC1=0x%08x  %s\n",
-                  emimpu_read(READ_SA, region, 0), emimpu_read(READ_EA, region, 0),
-                  emimpu_read(READ_APC, region, 0), emimpu_read(READ_APC, region, 1),
-                  (emimpu_read(READ_SA, region, 0) == (u32)(start_rel >> ADDR_ALIGN)) ?
-                  "WRITTEN-OK" : "WRITE-REJECTED");
+              ret = mtk_emimpu_set_protection((struct emimpu_region_t *)&rg);
+              pr_info("[emi_fix] ★ set_protection rc=%d  %s\n", ret,
+                  ret == 0 ? "调用成功" : "被拒绝");
 
               return 0;
           }
@@ -1835,7 +1788,7 @@ jobs:
           module_init(emi_fix_init);
           module_exit(emi_fix_exit);
           MODULE_LICENSE("GPL");
-          MODULE_DESCRIPTION("stock emimpu.c convention replica");
+          MODULE_DESCRIPTION("call kernel emimpu API directly");
           EOF
           echo "== 4.995 完成 =="
 
