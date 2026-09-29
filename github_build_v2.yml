@@ -1747,10 +1747,10 @@ jobs:
           static void __iomem *emu_base;
           static int region = 15;
           module_param(region, int, 0644);
-          static ullong fw_start = 0x7e000000ULL;
-          module_param(fw_start, ullong, 0644);
-          static ullong fw_size = 0x600000ULL;
-          module_param(fw_size, ullong, 0644);
+          static ulong fw_start = 0x7e000000ULL;
+          module_param(fw_start, ulong, 0644);
+          static ulong fw_size = 0x600000ULL;
+          module_param(fw_size, ulong, 0644);
           static int do_read;
           module_param(do_read, int, 0644);
 
