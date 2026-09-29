@@ -1730,58 +1730,59 @@ jobs:
           cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * emi_fix v7 - 只读扫描：定位 CONSYS 窗口基址寄存器
+           * emi_fix v8 - OPPO EMIMPU_SET (0x262) 专项测试
            *
-           * 已实证的映射：芯片地址 0xa006000 → 主机 DRAM 0x7e006010
-           * → CONSYS 寄存器区（0x18002000，1MB）里应有一个保存 0x7e000000
-           *   （或 0x07e00000 字节序变体）的窗口基址寄存器。
-           * 找到它 → 改指自由内存 → 芯片 DMA 离开受保护池。
-           *
-           * 本版本只读，不写任何寄存器。
+           * 已排除：0x50B 上游 ✗ / 0x260 写 a0=-1 ✗ / 0x261 读返回假值 ✗ / ioremap 直写崩溃 ✗
+           * 未测试：0x262 = mt_emi_mpu_set_region_protection(start, end, region_permission)
+           *         —— 正是 gen4m 的 kalSetEmiMpuProtection 原厂实现应走的通道
            */
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
-          #include <linux/io.h>
+          #include <linux/arm-smccc.h>
+          #include <linux/soc/mediatek/mtk_sip_svc.h>
 
-          #define CONSYS_PA    0x18002000UL
-          #define CONSYS_SZ    0x100000UL
+          #define SIP_SET        MTK_SIP_KERNEL_EMIMPU_SET
+          #define SIP_READ    MTK_SIP_KERNEL_EMIMPU_READ
 
-          static void __iomem *csr;
+          static u32 emimpu_read(u32 off)
+          {
+              struct arm_smccc_res res;
+
+              arm_smccc_smc(SIP_READ, off, 0, 0, 0, 0, 0, 0, &res);
+              return (u32)res.a0;
+          }
+
+          static void try_set(const char *tag, unsigned long long a, unsigned long long b,
+                      unsigned int perm)
+          {
+              struct arm_smccc_res res;
+
+              arm_smccc_smc(SIP_SET, a, b, perm, 0, 0, 0, 0, &res);
+              pr_info("[emi_fix] SET %s: start=0x%llx end=0x%llx perm=0x%x => a0=0x%lx a1=0x%lx a2=0x%lx\n",
+                  tag, a, b, perm, res.a0, res.a1, res.a2);
+          }
 
           static int __init emi_fix_init(void)
           {
-              u32 off, i;
+              pr_info("[emi_fix] v8: 0x262 EMIMPU_SET 专项测试\n");
+              pr_info("[emi_fix] 0x261 read MPUS(0x1f0)=0x%08x (对照: 0x405f001c)\n",
+                  emimpu_read(0x1f0));
 
-              csr = ioremap(CONSYS_PA, CONSYS_SZ);
-              if (!csr) {
-                  pr_err("[emi_fix] ioremap CONSYS failed\n");
-                  return -ENOMEM;
-              }
-              pr_info("[emi_fix] v7: CONSYS 0x%lx mapped, 只读扫描模式\n", CONSYS_PA);
+              /* 物理地址 + NO_PROTECTION */
+              try_set("phys-perm0", 0x7e000000ULL, 0x7e5fffffULL, 0);
+              /* 物理地址 + 全域可读写（每域 4bit=2 SEC_RW_NS_R...试宽松组合）*/
+              try_set("phys-perm6666", 0x7e000000ULL, 0x7e5fffffULL, 0x66666666);
+              /* 编码地址（去 DRAM_OFFSET 右移16）+ NO_PROTECTION */
+              try_set("enc-perm0", 0x3e00ULL, 0x3e5fULL, 0);
+              /* 编码地址不移位 */
+              try_set("enc2-perm0", 0x7e00ULL, 0x7e5fULL, 0);
 
-              /* 1) 找保存 0x7e000000 / 0x07e00000 的寄存器（窗口基址） */
-              for (i = 0; i < CONSYS_SZ; i += 4) {
-                  u32 v = readl(csr + i);
-                  if (v == 0x7e000000 || v == 0x07e00000)
-                      pr_info("[emi_fix] HIT 0x%lx = 0x%08x (window base candidate)\n",
-                          CONSYS_PA + i, v);
-              }
+              /* 读回验证（0x261）: MPUS 与 R15 的 SA/EA/APC */
+              pr_info("[emi_fix] 0x261 readback: MPUS=0x%08x SA15=0x%08x EA15=0x%08x APC15=0x%08x\n",
+                  emimpu_read(0x1f0), emimpu_read(0x13c), emimpu_read(0x23c),
+                  emimpu_read(0x33c));
 
-              /* 2) dump 0x000-0x400（remap 常见偏移段，全量十六进制行） */
-              for (off = 0; off < 0x400; off += 0x10)
-                  pr_info("[emi_fix] CSR+%04x: %08x %08x %08x %08x\n", off,
-                      readl(csr + off), readl(csr + off + 4),
-                      readl(csr + off + 8), readl(csr + off + 0xc));
-
-              /* 3) dump 0x400-0x1000 的非零寄存器 */
-              for (off = 0x400; off < 0x1000; off += 4) {
-                  u32 v = readl(csr + off);
-                  if (v)
-                      pr_info("[emi_fix] CSR+%04x = %08x\n", off, v);
-              }
-
-              iounmap(csr);
               return 0;
           }
 
@@ -1793,7 +1794,7 @@ jobs:
           module_init(emi_fix_init);
           module_exit(emi_fix_exit);
           MODULE_LICENSE("GPL");
-          MODULE_DESCRIPTION("CONSYS CSR read-only scanner");
+          MODULE_DESCRIPTION("OPPO EMIMPU_SET (0x262)专项测试");
           EOF
           echo "== 4.995 完成 =="
 
