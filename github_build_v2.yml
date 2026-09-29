@@ -1774,12 +1774,12 @@ jobs:
           module_param(region, int, 0644);
           MODULE_PARM_DESC(region, "region slot to program");
 
-          static ullong fw_start = 0x7e000000ULL;
-          module_param(fw_start, ullong, 0644);
+          static ulong fw_start = 0x7e000000ULL;
+          module_param(fw_start, ulong, 0644);
           MODULE_PARM_DESC(fw_start, "wifi reserved pool physical start");
 
-          static ullong fw_size = 0x600000ULL;
-          module_param(fw_size, ullong, 0644);
+          static ulong fw_size = 0x600000ULL;
+          module_param(fw_size, ulong, 0644);
           MODULE_PARM_DESC(fw_size, "wifi reserved pool size");
 
           static int do_read;
