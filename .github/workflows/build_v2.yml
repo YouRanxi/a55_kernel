@@ -1721,113 +1721,58 @@ jobs:
           cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           /*
-           * emi_fix v6 - EMIMPU 寄存器直读直写（绕开 SIP/SMC）
+           * emi_fix v7 - 只读扫描：定位 CONSYS 窗口基址寄存器
            *
-           * 实证（v5 + violation handler 对照）：
-           *   - violation IRQ 处理器直接 ioremap 读 0x1f0 = 0x405f001c（真实值 ✓）
-           *   - SMC 0x261 读同一寄存器 = 0xffffffff（假值 ✗）——OPPO ATF 的 EMIMPU
-           *     SIP 处理器不工作（a0=-1 全拒绝）
-           *   → 本版本：ioremap 0x10226000 后直接 readl/writel
+           * 已实证的映射：芯片地址 0xa006000 → 主机 DRAM 0x7e006010
+           * → CONSYS 寄存器区（0x18002000，1MB）里应有一个保存 0x7e000000
+           *   （或 0x07e00000 字节序变体）的窗口基址寄存器。
+           * 找到它 → 改指自由内存 → 芯片 DMA 离开受保护池。
+           *
+           * 本版本只读，不写任何寄存器。
            */
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
           #include <linux/io.h>
-          #include <linux/arm-smccc.h>
-          #include <linux/soc/mediatek/mtk_sip_svc.h>
 
-          #define EMIMPU_PA    0x10226000UL
-          #define EMIMPU_SZ    0x1000
+          #define CONSYS_PA    0x18002000UL
+          #define CONSYS_SZ    0x100000UL
 
-          #define DRAM_OFFSET    0x40000000ULL
-          #define SA0        0x100
-          #define EA0        0x200
-          #define APC0        0x300
-
-          static void __iomem *emu_base;
-          static int region = 15;
-          module_param(region, int, 0644);
-          static ulong fw_start = 0x7e000000ULL;
-          module_param(fw_start, ulong, 0644);
-          static ulong fw_size = 0x600000ULL;
-          module_param(fw_size, ulong, 0644);
-          static int do_read;
-          module_param(do_read, int, 0644);
-
-          static inline u32 rr(u32 off)
-          {
-              return readl(emu_base + off);
-          }
-
-          static inline void ww(u32 off, u32 val)
-          {
-              writel(val, emu_base + off);
-          }
-
-          /* SMC 版对照（验证 SIP 通路状态） */
-          static u32 smc_read(u32 off)
-          {
-              struct arm_smccc_res res;
-
-              arm_smccc_smc(MTK_SIP_KERNEL_EMIMPU_READ, off, 0, 0, 0, 0, 0, 0, &res);
-              return (u32)res.a0;
-          }
+          static void __iomem *csr;
 
           static int __init emi_fix_init(void)
           {
-              u32 sa_raw, ea_raw, cur;
-              int r;
+              u32 off, i;
 
-              emu_base = ioremap(EMIMPU_PA, EMIMPU_SZ);
-              if (!emu_base) {
-                  pr_err("[emi_fix] ioremap 0x%lx failed\n", EMIMPU_PA);
+              csr = ioremap(CONSYS_PA, CONSYS_SZ);
+              if (!csr) {
+                  pr_err("[emi_fix] ioremap CONSYS failed\n");
                   return -ENOMEM;
               }
-              pr_info("[emi_fix] v6: ioremap 0x%lx OK, 直接寄存器读写模式\n", EMIMPU_PA);
+              pr_info("[emi_fix] v7: CONSYS 0x%lx mapped, 只读扫描模式\n", CONSYS_PA);
 
-              /* 读通路校验：MPUS 应为真实值（violation handler 读到 0x405f001c） */
-              pr_info("[emi_fix] 直读 MPUS(0x1f0)=0x%08x（对照: violation log 0x405f001c）\n",
-                  rr(0x1f0));
-              pr_info("[emi_fix] SMC 读同寄存器=0x%08x（对照用）\n", smc_read(0x1f0));
-
-              /* 真实配置图：非默认的区域 */
-              for (r = 0; r < 32; r++) {
-                  u32 sa = rr(SA0 + r * 4);
-                  u32 ea = rr(EA0 + r * 4);
-                  if (sa != 0xffffffff && ea != 0xffffffff)
-                      pr_info("[emi_fix] R%02d: SA=0x%08x EA=0x%08x => 0x%08llx-0x%08llx\n",
-                          r, sa, ea,
-                          ((u64)sa << 16) + DRAM_OFFSET,
-                          (((u64)ea << 16) + DRAM_OFFSET) | 0xffff);
+              /* 1) 找保存 0x7e000000 / 0x07e00000 的寄存器（窗口基址） */
+              for (i = 0; i < CONSYS_SZ; i += 4) {
+                  u32 v = readl(csr + i);
+                  if (v == 0x7e000000 || v == 0x07e00000)
+                      pr_info("[emi_fix] HIT 0x%lx = 0x%08x (window base candidate)\n",
+                          CONSYS_PA + i, v);
               }
 
-              sa_raw = (u32)((fw_start - DRAM_OFFSET) >> 16);
-              ea_raw = (u32)((fw_start + fw_size - 1 - DRAM_OFFSET) >> 16);
-              pr_info("[emi_fix] 目标 R%d: SA=0x%x EA=0x%x (0x%llx - 0x%llx)\n",
-                  region, sa_raw, ea_raw, fw_start, fw_start + fw_size - 1);
+              /* 2) dump 0x000-0x400（remap 常见偏移段，全量十六进制行） */
+              for (off = 0; off < 0x400; off += 0x10)
+                  pr_info("[emi_fix] CSR+%04x: %08x %08x %08x %08x\n", off,
+                      readl(csr + off), readl(csr + off + 4),
+                      readl(csr + off + 8), readl(csr + off + 0xc));
 
-              cur = rr(SA0 + region * 4);
-              pr_info("[emi_fix] 写前 R%d SA=0x%08x\n", region, cur);
-
-              if (do_read) {
-                  iounmap(emu_base);
-                  return 0;
+              /* 3) dump 0x400-0x1000 的非零寄存器 */
+              for (off = 0x400; off < 0x1000; off += 4) {
+                  u32 v = readl(csr + off);
+                  if (v)
+                      pr_info("[emi_fix] CSR+%04x = %08x\n", off, v);
               }
 
-              /* 直接写：SA/EA/APC 两组（16 域全 NO_PROTECTION） */
-              ww(SA0 + region * 4, sa_raw);
-              ww(EA0 + region * 4, ea_raw);
-              ww(APC0 + region * 4, 0);
-              ww(APC0 + region * 4 + 0x100, 0);
-
-              /* 读回验证 */
-              pr_info("[emi_fix] 写后 R%d: SA=0x%08x EA=0x%08x APC0=0x%08x APC1=0x%08x  %s\n",
-                  region, rr(SA0 + region * 4), rr(EA0 + region * 4),
-                  rr(APC0 + region * 4), rr(APC0 + region * 4 + 0x100),
-                  (rr(SA0 + region * 4) == sa_raw) ? "★ 写入生效 ✓✓✓" :
-                  "✗ 写入被拒（寄存器写保护）");
-
-              iounmap(emu_base);
+              iounmap(csr);
               return 0;
           }
 
@@ -1839,7 +1784,7 @@ jobs:
           module_init(emi_fix_init);
           module_exit(emi_fix_exit);
           MODULE_LICENSE("GPL");
-          MODULE_DESCRIPTION("EMIMPU direct register RW (bypass SIP)");
+          MODULE_DESCRIPTION("CONSYS CSR read-only scanner");
           EOF
           echo "== 4.995 完成 =="
 
