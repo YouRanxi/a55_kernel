@@ -374,6 +374,7 @@ jobs:
               unsigned int apc[EMI_FIX_DGROUP_MAX];
           };
           extern int emi_mpu_set_protection(struct emi_region_info_t *region_info);
+          extern int emi_mpu_set_single_permission(unsigned int region, unsigned int domain, unsigned int permission);
 
           /* ---- wmt_drv 导出的 CONSYS EMI 基址/大小 ---- */
           extern unsigned long long gConEmiPhyBase;
@@ -406,6 +407,10 @@ jobs:
           static unsigned long long set_size;
           module_param(set_size, ullong, 0644);
           MODULE_PARM_DESC(set_size, "if non-zero, write it into gConEmiSize");
+
+          static int sweep;
+          module_param(sweep, int, 0644);
+          MODULE_PARM_DESC(sweep, "1 = set NO_PROTECTION on ALL 32 regions x 16 domains via set_single_permission");
 
           static int dry_run;
           module_param(dry_run, int, 0644);
@@ -449,6 +454,17 @@ jobs:
               }
               ret = emi_mpu_set_protection(&r);
               pr_info("[emi_fix] emi_mpu_set_protection ret=%d\n", ret);
+              if (sweep) {
+                  int rg, dm, cnt = 0, ok = 0;
+                  for (rg = 0; rg < 32; rg++)
+                      for (dm = 0; dm < 16; dm++) {
+                          int r2 = emi_mpu_set_single_permission((unsigned int)rg,
+                              (unsigned int)dm, 0 /* NO_PROTECTION */);
+                          cnt++;
+                          if (r2 == 0) ok++;
+                      }
+                  pr_info("[emi_fix] sweep: %d 次调用，%d 次返回 0\n", cnt, ok);
+              }
               return 0;   /* 失败也不卸载，方便观察 */
           }
 
