@@ -1719,135 +1719,141 @@ jobs:
             obj-m += emi_fix.o
           EOF
           cat > "$GITHUB_WORKSPACE/emi_fix/emi_fix.c" <<'EOF'
-            // SPDX-License-Identifier: GPL-2.0
-            /*
-             * emi_fix - 为 WiFi(CONSYS) 子系统配置 EMI MPU 访问权限
-             *
-             * 背景：公开树缺少 conninfra 的 mt6833 平台代码，芯片的 EMI MPU 配置缺失，
-             *       导致 WiFi 固件下载时被 MPU 拒绝（emimpu_violation_irq: violation at emi0）。
-             *       内核已导出 emi_mpu_set_protection()，此处直接调用补上。
-             *
-             * 所有关键值都是模块参数 → 一次编译可试多种配置，无需反复重建。
-             * 用法示例：
-             *   insmod emi_fix.ko region=15 start=0x0 size=0x0 apc=0     # 全放行
-             *   insmod emi_fix.ko region=8  apc=0x00000000000000000000    # 指定槽位
-             */
-            #include <linux/module.h>
-            #include <linux/kernel.h>
-            #include <linux/init.h>
+          // SPDX-License-Identifier: GPL-2.0
+          /*
+           * emi_fix v5 - OPPO EMIMPU 直连诊断/修复
+           *
+           * 背景：gen4m 把全部 DMA 内存切到 DT 的 wifi-reserve-memory（0x7e000000 起 6MB，
+           * no-map 共享 DMA 池）。该池被 ATF 开机 MPU 保护，而本机缺原厂内建 conninfra
+           * 的解锁代码 → 池禁写 → 固件下载配置阶段失败（Fail reason 5）。
+           *
+           * 本机（OPPO mt6833）的 EMIMPU 控制走 OPPO 私有 SIP：
+           *   MTK_SIP_KERNEL_EMIMPU_WRITE 0x260 (offset, data)   —— 按偏移写 MPU 寄存器
+           *   MTK_SIP_KERNEL_EMIMPU_READ  0x261 (offset) -> a0   —— 按偏移读
+           *   MTK_SIP_KERNEL_EMIMPU_SET   0x262 (start,end,perm) —— 整区设置
+           * （上游 MTK_SIP_EMIMPU_CONTROL 0x50B 在本机 ATF 上无效——已实证）
+           *
+           * 寄存器布局（emi/mt6885/mt_emi.h，与本机 violation 偏移 0x1f0 实测吻合）：
+           *   SA0=0x100+4r, EA0=0x200+4r, APC0=0x300+4r(+dgroup*0x100), MPUS=0x1F0
+           *   原始地址格式：(物理地址 - DRAM_OFFSET 0x40000000) >> 16
+           */
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/init.h>
+          #include <linux/arm-smccc.h>
+          #include <linux/soc/mediatek/mtk_sip_svc.h>
 
-            /* ---- 与内核 drivers/misc/mediatek/emi/submodule/mpu_v1.h 保持一致 ---- */
-            #define EMI_FIX_DGROUP_MAX 8          /* 上限，内核只读它自己的组数，给大更安全 */
-            struct emi_region_info_t {
-                unsigned long long start;
-                unsigned long long end;
-                unsigned int region;
-                unsigned int apc[EMI_FIX_DGROUP_MAX];
-            };
-            extern int emi_mpu_set_protection(struct emi_region_info_t *region_info);
-            extern int emi_mpu_set_single_permission(unsigned int region, unsigned int domain, unsigned int permission);
+          #define EMIMPU_WRITE    MTK_SIP_KERNEL_EMIMPU_WRITE
+          #define EMIMPU_READ    MTK_SIP_KERNEL_EMIMPU_READ
 
-            /* ---- wmt_drv 导出的 CONSYS EMI 基址/大小 ---- */
-            extern unsigned long long gConEmiPhyBase;
-            extern unsigned long long gConEmiSize;
+          #define DRAM_OFFSET    0x40000000ULL
+          #define SA0        0x100
+          #define EA0        0x200
+          #define APC0        0x300
 
-            static int region = 15;
-            module_param(region, int, 0644);
-            MODULE_PARM_DESC(region, "EMI MPU region slot (0-31)");
+          static u32 emimpu_read(u32 offset, long *a0out)
+          {
+              struct arm_smccc_res res;
 
-            static unsigned long long start;
-            module_param(start, ullong, 0644);
-            MODULE_PARM_DESC(start, "region start (0 = use gConEmiPhyBase)");
+              arm_smccc_smc(EMIMPU_READ, offset, 0, 0, 0, 0, 0, 0, &res);
+              if (a0out)
+                  *a0out = res.a0;
+              return (u32)res.a0;
+          }
 
-            static unsigned long long size;
-            module_param(size, ullong, 0644);
-            MODULE_PARM_DESC(size, "region size (0 = use gConEmiSize)");
+          static void emimpu_write(u32 offset, u32 data)
+          {
+              struct arm_smccc_res res;
 
-            static ulong apc0 = 0;
-            module_param(apc0, ulong, 0644);
-            MODULE_PARM_DESC(apc0, "apc[0] value (0 = all domains NO_PROTECTION)");
+              arm_smccc_smc(EMIMPU_WRITE, offset, data, 0, 0, 0, 0, 0, &res);
+              pr_info("[emi_fix]   write 0x%03x <= 0x%08x  (a0=0x%lx)\n",
+                  offset, data, res.a0);
+          }
 
-            static ulong apc1 = 0;
-            module_param(apc1, ulong, 0644);
-            MODULE_PARM_DESC(apc1, "apc[1] value");
+          static int region = 15;
+          module_param(region, int, 0644);
+          MODULE_PARM_DESC(region, "region slot to program");
 
-            static unsigned long long set_base;
-            module_param(set_base, ullong, 0644);
-            MODULE_PARM_DESC(set_base, "if non-zero, write it into gConEmiPhyBase before configuring MPU");
+          static ullong fw_start = 0x7e000000ULL;
+          module_param(fw_start, ullong, 0644);
+          MODULE_PARM_DESC(fw_start, "wifi reserved pool physical start");
 
-            static unsigned long long set_size;
-            module_param(set_size, ullong, 0644);
-            MODULE_PARM_DESC(set_size, "if non-zero, write it into gConEmiSize");
+          static ullong fw_size = 0x600000ULL;
+          module_param(fw_size, ullong, 0644);
+          MODULE_PARM_DESC(fw_size, "wifi reserved pool size");
 
-            static int sweep;
-            module_param(sweep, int, 0644);
-            MODULE_PARM_DESC(sweep, "1 = set NO_PROTECTION on ALL 32 regions x 16 domains via set_single_permission");
+          static int do_read;
+          module_param(do_read, int, 0644);
+          MODULE_PARM_DESC(do_read, "1 = only dump current MPU config");
 
-            static int dry_run;
-            module_param(dry_run, int, 0644);
-            MODULE_PARM_DESC(dry_run, "1 = only print, do not touch MPU");
+          static int __init emi_fix_init(void)
+          {
+              u32 sa_raw, ea_raw;
+              u32 r15_sa, r15_ea, r15_apc0, r15_apc1;
+              long a0;
+              int r;
 
-            static int __init emi_fix_init(void)
-            {
-                struct emi_region_info_t r;
-                unsigned long long b = start, s = size;
-                int i, ret;
+              pr_info("[emi_fix] v5: OPPO EMIMPU direct (SIP 0x260/0x261)\n");
 
-                pr_info("[emi_fix] BEFORE: gConEmiPhyBase=0x%llx gConEmiSize=0x%llx\n",
-                    gConEmiPhyBase, gConEmiSize);
-                if (set_base) {
-                    gConEmiPhyBase = set_base;
-                    if (set_size)
-                        gConEmiSize = set_size;
-                    pr_info("[emi_fix] OVERRIDE -> base=0x%llx size=0x%llx\n",
-                        gConEmiPhyBase, gConEmiSize);
-                }
-                if (!b || !s) {
-                    b = gConEmiPhyBase;
-                    s = gConEmiSize;
-                }
-                memset(&r, 0, sizeof(r));
-                r.region = (unsigned int)region;
-                r.start = b;
-                r.end = (s ? (b + s - 1) : b);
-                r.apc[0] = (unsigned int)apc0;
-                r.apc[1] = (unsigned int)apc1;
+              /* 0) violation 状态寄存器当前值 */
+              pr_info("[emi_fix] MPUS(0x1f0)=0x%08x MPUT(0x1f8)=0x%08x MPUT2(0x1fc)=0x%08x\n",
+                  emimpu_read(0x1f0, NULL), emimpu_read(0x1f8, NULL),
+                  emimpu_read(0x1fc, NULL));
 
-                pr_info("[emi_fix] region=%d start=0x%llx end=0x%llx apc[0]=0x%x apc[1]=0x%x dry=%d\n",
-                    r.region, r.start, r.end, r.apc[0], r.apc[1], dry_run);
-                pr_info("[emi_fix] CONSYS EMI base=0x%llx size=0x%llx\n", gConEmiPhyBase, gConEmiSize);
-                for (i = 0; i < 2; i++)
-                    pr_info("[emi_fix] apc[%d]=0x%08x\n", i, r.apc[i]);
+              /* 1) 读回全部 32 区域的 SA/EA（真实配置图） */
+              for (r = 0; r < 32; r++) {
+                  u32 sa = emimpu_read(SA0 + r * 4, NULL);
+                  u32 ea = emimpu_read(EA0 + r * 4, NULL);
+                  if (sa != 0x2 || ea != 0x2)   /* 0x2 = 复位默认特征值 */
+                      pr_info("[emi_fix] R%02d: SA=0x%08x EA=0x%08x  => 0x%08llx-0x%08llx\n",
+                          r, sa, ea,
+                          ((u64)sa << 16) + DRAM_OFFSET,
+                          (((u64)ea << 16) + DRAM_OFFSET) | 0xffff);
+              }
 
-                if (dry_run) {
-                    pr_info("[emi_fix] dry_run, skip emi_mpu_set_protection\n");
-                    return 0;
-                }
-                ret = emi_mpu_set_protection(&r);
-                pr_info("[emi_fix] emi_mpu_set_protection ret=%d\n", ret);
-                if (sweep) {
-                    int rg, dm, cnt = 0, ok = 0;
-                    for (rg = 0; rg < 32; rg++)
-                        for (dm = 0; dm < 16; dm++) {
-                            int r2 = emi_mpu_set_single_permission((unsigned int)rg,
-                                (unsigned int)dm, 0 /* NO_PROTECTION */);
-                            cnt++;
-                            if (r2 == 0) ok++;
-                        }
-                    pr_info("[emi_fix] sweep: %d 次调用，%d 次返回 0\n", cnt, ok);
-                }
-                return 0;   /* 失败也不卸载，方便观察 */
-            }
+              /* 2) 配置 region 槽位（物理地址 -> 原始格式） */
+              sa_raw = (u32)((fw_start - DRAM_OFFSET) >> 16);
+              ea_raw = (u32)((fw_start + fw_size - 1 - DRAM_OFFSET) >> 16);
+              pr_info("[emi_fix] target: region=%d start=%llx end=%llx -> SA=0x%x EA=0x%x\n",
+                  region, fw_start, fw_start + fw_size - 1, sa_raw, ea_raw);
 
-            static void __exit emi_fix_exit(void)
-            {
-                pr_info("[emi_fix] unloaded\n");
-            }
+              r15_sa  = emimpu_read(SA0 + region * 4, &a0);
+              r15_ea  = emimpu_read(EA0 + region * 4, &a0);
+              r15_apc0 = emimpu_read(APC0 + region * 4, &a0);
+              r15_apc1 = emimpu_read(APC0 + region * 4 + 0x100, &a0);
+              pr_info("[emi_fix] before R%d: SA=0x%x EA=0x%x APC0=0x%x APC1=0x%x\n",
+                  region, r15_sa, r15_ea, r15_apc0, r15_apc1);
 
-            module_init(emi_fix_init);
-            module_exit(emi_fix_exit);
-            MODULE_LICENSE("GPL");
-            MODULE_DESCRIPTION("Configure EMI MPU access for WiFi/CONSYS");
+              if (do_read)
+                  return 0;
+
+              /* 3) 写入：SA/EA + 全 16 域 NO_PROTECTION（APC 两组全 0） */
+              emimpu_write(SA0 + region * 4, sa_raw);
+              emimpu_write(EA0 + region * 4, ea_raw);
+              emimpu_write(APC0 + region * 4, 0);
+              emimpu_write(APC0 + region * 4 + 0x100, 0);
+
+              /* 4) 读回验证 */
+              r15_sa  = emimpu_read(SA0 + region * 4, &a0);
+              r15_ea  = emimpu_read(EA0 + region * 4, &a0);
+              r15_apc0 = emimpu_read(APC0 + region * 4, &a0);
+              r15_apc1 = emimpu_read(APC0 + region * 4 + 0x100, &a0);
+              pr_info("[emi_fix] after R%d: SA=0x%x EA=0x%x APC0=0x%x APC1=0x%x  %s\n",
+                  region, r15_sa, r15_ea, r15_apc0, r15_apc1,
+                  (r15_sa == sa_raw && r15_ea == ea_raw) ? "OK-WRITTEN" : "FAILED (ATF rejected)");
+
+              return 0;
+          }
+
+          static void __exit emi_fix_exit(void)
+          {
+              pr_info("[emi_fix] unloaded\n");
+          }
+
+          module_init(emi_fix_init);
+          module_exit(emi_fix_exit);
+          MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("OPPO EMIMPU direct SMC diagnostic/fix");
           EOF
           echo "== 4.995 完成 =="
 
