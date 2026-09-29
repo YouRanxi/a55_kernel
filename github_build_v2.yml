@@ -78,6 +78,15 @@ jobs:
           test -f vendor/oplus/kernel/oplus_performance/sched_assist/sched_assist_mutex.h \
             || { echo "!! vendor 树不在正确位置（应为 <workspace>/vendor/oplus/...）"; exit 1; }
           echo "OK  vendor 树就位"
+          # ★ WiFi 关键实验：去掉 wifi-reserve-memory 的 no-map 属性
+          #   no-map 保留区会被安全固件在开机时用 EMI MPU 锁死（FORBIDDEN），
+          #   WiFi 固件下载写不进去（violation）。去掉 no-map 后该区域变为
+          #   内核保留可用内存，LK/ATF 不再上锁，驱动与芯片均可访问。
+          grep -rl "wifi_mem: wifi-reserve-memory" kernel/arch/arm64/boot/dts/ 2>/dev/null | while read f; do
+            sed -i '/wifi_mem: wifi-reserve-memory {/,/};/{/no-map;/d;}' "$f"
+            echo "no-map removed: $f"
+          done
+          grep -rn "no-map" kernel/arch/arm64/boot/dts/mediatek/mt6833.dts | grep -c wifi || echo "mt6833.dts 中 wifi 区已无 no-map ✓"
 
           echo "== 修正仓库自带的 1 处错误链接 =="
           # drivers/base/kernelFwUpdate 的目标写成了 ../../../../vnd/vendor/...，
