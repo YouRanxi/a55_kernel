@@ -2328,6 +2328,14 @@ jobs:
             modules_out/**
             modules_flat/**
             manager_apk/**
+      - name: 7.1 上传 emi_fix 单独小产物（弱网应急）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emi-fix-only
+          retention-days: 30
+          if-no-files-found: ignore
+          path: conn_modules/emi_fix.ko
             conn_modules/**
             kernel/out/Module.symvers
 
