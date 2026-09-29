@@ -1907,7 +1907,8 @@ jobs:
           # ② MTK_EMI_MPU 没开 → emi_mpu_set_protection 没导出 → 芯片的 EMI 访问权限
           #    无人配置 → WiFi 固件下载被 MPU 拒（emimpu_violation_irq）
           ./scripts/config --file out/.config -d FW_LOADER_USER_HELPER_FALLBACK
-          ./scripts/config --file out/.config -e MTK_EMI_LEGACY
+          # MTK_EMI_LEGACY 已撤：mt6885 适配代码开机覆写基带 MPU 区域（数据网络回归根因）
+          # 且运行时 MPU 重配置被 ATF 拒绝，该驱动栈无用
           $MAKE olddefconfig >/dev/null 2>&1 || true
           grep -E 'DTB_OVERLAY_IMAGE|APPENDED_DTB_IMAGE' out/.config || true
           grep -E 'FW_LOADER_USER_HELPER_FALLBACK|MTK_EMI_MPU' out/.config || true
@@ -2105,6 +2106,15 @@ jobs:
             sed -i 's/define CFG_SUPPORT_LLS 1/define CFG_SUPPORT_LLS 0/' "$f"
             echo "LLS disabled in: $f"
           done
+          # gen4m 的预分配池模式：把全部 DMA 内存切到 DT 的 wifi-reserve-memory
+          # （6MB no-map 池，被 ATF 开机 MPU 保护）。本机无原厂内建 conninfra 的
+          # 解锁代码 → 池禁写 → 固件下载配置阶段失败（Fail reason 5）。
+          # 关掉预分配 → 走标准 dma_alloc_coherent（普通内存，无保护），绕开死墙。
+          grep -rl "AXI_CFG_PREALLOC_MEMORY_BUFFER" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
+            sed -i 's/define AXI_CFG_PREALLOC_MEMORY_BUFFER 1/define AXI_CFG_PREALLOC_MEMORY_BUFFER 0/' "$f"
+            echo "PREALLOC disabled in: $f"
+          done
+          grep -rn "define AXI_CFG_PREALLOC_MEMORY_BUFFER" "$MODDIR/wlan/core/gen4m" | head -3
           # gen4m 源码用 gConEmiPhyBaseFinal / gConEmiSizeFinal（OPPO 私有别名，
           # 公开树只声明了 gConEmiPhyBase / gConEmiSize，由 conninfra/wmt 导出）
           # → 统一改用公开符号
