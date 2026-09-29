@@ -1901,11 +1901,49 @@ jobs:
             echo "仓库根目录没有 boot.bin，只输出内核镜像"; exit 0
           fi
 
+          echo "=========== DTB 手术：移除 wifi-reserve-memory 的 no-map ==========="
+          # 原厂 boot.bin 的 DTB 段带 no-map，安全固件开机据此用 EMI MPU 锁死
+          # WiFi 的 6MB DMA 池 → 固件下载被拒。dtc 反编译→删属性→重编译→原位写回。
+          cp ../boot.bin ../boot_patched.bin
+          python3 - <<'PY'
+          import struct
+          d = bytearray(open('../boot_patched.bin','rb').read())
+          i = d.find(b'\xd0\x0d\xfe\xed')
+          while i >= 0:
+              ts, = struct.unpack_from('>I', d, i+4)
+              os_, = struct.unpack_from('>I', d, i+8)
+              ostr, = struct.unpack_from('>I', d, i+12)
+              if 0x1000 <= ts <= 0x200000 and os_ < ts and ostr < ts:
+                  break
+              i = d.find(b'\xd0\x0d\xfe\xed', i+4)
+          else:
+              raise SystemExit('no FDT found in boot_patched.bin')
+          open('/tmp/stock.dtb','wb').write(bytes(d[i:i+ts]))
+          open('/tmp/dtb_loc.txt','w').write('%d %d' % (i, ts))
+          print('DTB located: offset=%d size=%d' % (i, ts))
+          PY
+          dtc -I dtb -O dts -o /tmp/stock.dts /tmp/stock.dtb
+          echo "before: $(grep -c 'no-map' /tmp/stock.dts) no-map entries"
+          sed -i '/wifi-reserve-memory {/,/};/{/no-map;/d;}' /tmp/stock.dts
+          echo "after: $(grep -c 'no-map' /tmp/stock.dts) no-map entries"
+          dtc -I dts -O dtb -o /tmp/new.dtb /tmp/stock.dts
+          ls -la /tmp/new.dtb /tmp/stock.dtb
+          python3 - <<'PY'
+          loc = open('/tmp/dtb_loc.txt').read().split()
+          off, size = int(loc[0]), int(loc[1])
+          new = open('/tmp/new.dtb','rb').read()
+          assert len(new) <= size, 'new DTB (%d) bigger than old (%d)' % (len(new), size)
+          d = bytearray(open('../boot_patched.bin','rb').read())
+          d[off:off+size] = new + b'\x00' * (size - len(new))
+          open('../boot_patched.bin','wb').write(bytes(d))
+          print('DTB patched in place: offset=%d new=%d padded-to=%d' % (off, len(new), size))
+          PY
+
           echo "=========== 原始 boot.bin 结构 ==========="
-          python3 ../mkboot.py --info ../boot.bin
+          python3 ../mkboot.py --info ../boot_patched.bin
 
           echo "=========== 替换 kernel 段 ==========="
-          python3 ../mkboot.py ../boot.bin "$IMAGE" "$GITHUB_WORKSPACE/boot_kernelsu.img"
+          python3 ../mkboot.py ../boot_patched.bin "$IMAGE" "$GITHUB_WORKSPACE/boot_kernelsu.img"
 
           echo "=========== 生成结果复验 ==========="
           python3 ../mkboot.py --info "$GITHUB_WORKSPACE/boot_kernelsu.img"
