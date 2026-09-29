@@ -1760,7 +1760,7 @@ jobs:
 
               pr_info("[emi_fix] v10: 直接调用内核 mtk_emimpu_* API\n");
 
-              ret = mtk_emimpu_init_region((struct emimpu_region_t *)&rg, 15);
+              ret = mtk_emimpu_init_region((struct emimpu_region_t *)&rg, 27);
               pr_info("[emi_fix] init_region rc=%d\n", ret);
 
               ret = mtk_emimpu_set_addr((struct emimpu_region_t *)&rg,
@@ -1768,9 +1768,14 @@ jobs:
               pr_info("[emi_fix] set_addr rc=%d\n", ret);
 
               for (i = 0; i < 16; i++) {
-                  ret = mtk_emimpu_set_apc((struct emimpu_region_t *)&rg, i,
+                  int dom = -1;
+                  if (i == 0 || i == 2 || i == 3)
+                      dom = i;
+                  if (dom < 0)
+                      continue;
+                  ret = mtk_emimpu_set_apc((struct emimpu_region_t *)&rg, dom,
                       MTK_EMIMPU_NO_PROTECTION);
-                  pr_info("[emi_fix] set_apc[%d] rc=%d\n", i, ret);
+                  pr_info("[emi_fix] set_apc[dom%d] rc=%d\n", dom, ret);
               }
 
               ret = mtk_emimpu_set_protection((struct emimpu_region_t *)&rg);
