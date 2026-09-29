@@ -2273,6 +2273,9 @@ jobs:
             modules_out/**
             modules_flat/**
             manager_apk/**
+            conn_modules/**
+            kernel/out/Module.symvers
+
       - name: 7.1 上传 emi_fix 单独小产物（弱网应急）
         if: always()
         uses: actions/upload-artifact@v4
@@ -2281,8 +2284,6 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
           path: conn_modules/emi_fix.ko
-            conn_modules/**
-            kernel/out/Module.symvers
 
       - name: 8. 失败时输出日志尾部
         if: failure()
