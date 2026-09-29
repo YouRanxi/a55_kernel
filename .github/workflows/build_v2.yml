@@ -2111,9 +2111,10 @@ jobs:
           # 解锁代码 → 池禁写 → 固件下载配置阶段失败（Fail reason 5）。
           # 关掉预分配 → 走标准 dma_alloc_coherent（普通内存，无保护），绕开死墙。
           grep -rl "AXI_CFG_PREALLOC_MEMORY_BUFFER" "$MODDIR/wlan/core/gen4m" 2>/dev/null | while read f; do
-            sed -i 's/define AXI_CFG_PREALLOC_MEMORY_BUFFER 1/define AXI_CFG_PREALLOC_MEMORY_BUFFER 0/' "$f"
+            sed -i 's/define AXI_CFG_PREALLOC_MEMORY_BUFFER[[:space:]]*1/define AXI_CFG_PREALLOC_MEMORY_BUFFER 0/' "$f"
             echo "PREALLOC disabled in: $f"
           done
+          echo "== 验证：=0 则补丁生效 =="
           grep -rn "define AXI_CFG_PREALLOC_MEMORY_BUFFER" "$MODDIR/wlan/core/gen4m" | head -3
           # gen4m 源码用 gConEmiPhyBaseFinal / gConEmiSizeFinal（OPPO 私有别名，
           # 公开树只声明了 gConEmiPhyBase / gConEmiSize，由 conninfra/wmt 导出）
